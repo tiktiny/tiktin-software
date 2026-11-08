@@ -13,6 +13,14 @@ PRINT_LINE_PT = 0.8       # עובי קו בהדפסה ובשמירה
 KIND_NAME = {"floor": "חור ברצפה", "ceil": "חור בתקרה", "wall": "חור בקיר"}
 
 
+BAKE_OC = 0          # שכבת "סימוני טיקטין" שאליה נצרבים הסימונים (0 = בלי שכבה)
+MARK_TAG = b"%TIKTIN-MARKS"
+
+
+def OC():
+    return BAKE_OC
+
+
 def cm_to_pt(cm, S):
     return cm * 10.0 / S * PT_PER_MM
 
@@ -326,7 +334,7 @@ def bake_page(page, items, S):
     import pymupdf
     if not items:
         return
-    page.clean_contents()
+    page.wrap_contents()
     m = page.derotation_matrix
 
     def P(x, y):
@@ -340,7 +348,7 @@ def bake_page(page, items, S):
             pts = [P(x, y) for x, y in it["pts"]]
             if len(pts) >= 2:
                 shape.draw_polyline(pts)
-                shape.finish(color=_rgb(it["color"]), width=it["w"] * PT_PER_MM,
+                shape.finish(oc=OC(), color=_rgb(it["color"]), width=it["w"] * PT_PER_MM,
                              lineCap=1, lineJoin=1, closePath=False)
             continue
         if it["type"] == "dim":
@@ -354,7 +362,7 @@ def bake_page(page, items, S):
                 dx, dy = (ux - uy) * t / math.sqrt(2), (uy + ux) * t / math.sqrt(2)
                 for x, y in ((x1, y1), (x2, y2)):
                     shape.draw_line(P(x - dx, y - dy), P(x + dx, y + dy))
-            shape.finish(color=col, width=PRINT_LINE_PT, closePath=False)
+            shape.finish(oc=OC(), color=col, width=PRINT_LINE_PT, closePath=False)
         else:
             col = _rgb(it.get("color") or HOLE_COLOR)
             dashes = "[4 2.5] 0" if it["kind"] == "ceil" else None
@@ -373,7 +381,7 @@ def bake_page(page, items, S):
                 shape.draw_line(pts[0], pts[2])
                 if it["kind"] != "wall":
                     shape.draw_line(pts[1], pts[3])
-            shape.finish(color=col, width=PRINT_LINE_PT, dashes=dashes, closePath=False)
+            shape.finish(oc=OC(), color=col, width=PRINT_LINE_PT, dashes=dashes, closePath=False)
     shape.commit()
     for it in items:
         if it["type"] == "ink":
@@ -396,12 +404,12 @@ def bake_page(page, items, S):
         rect = pymupdf.Rect(lr.left() - 30, lr.top() - 1, lr.right() + 30, lr.bottom() + 3)
         if is_dim:
             bg = pymupdf.Rect(lr.left(), lr.top(), lr.right(), lr.bottom()) * m
-            page.draw_rect(bg, color=None, fill=(1, 1, 1), fill_opacity=0.92, overlay=True)
+            page.draw_rect(bg, color=None, fill=(1, 1, 1), fill_opacity=0.92, overlay=True, oc=OC())
         color = it.get("color") or (DIM_COLOR if is_dim else HOLE_COLOR)
         html = (f'<div dir="rtl" style="font-family:sans-serif;font-size:{LABEL_PT * 0.98:.2f}pt;'
                 f'line-height:1;color:{color};text-align:center">{label_text(it, S)}</div>')
         page.insert_htmlbox((rect * m).normalize() if page.rotation else rect, html,
-                            rotate=page.rotation, overlay=True)
+                            rotate=page.rotation, overlay=True, oc=OC())
 
 
 # ---------------------------------------------------------------- resize handles
@@ -607,7 +615,7 @@ def bake_text(page, it, m):
            'text-align:right')
     page.insert_htmlbox((rect * m).normalize() if page.rotation else rect,
                         f'<div dir="rtl" style="{css}">{body}</div>',
-                        rotate=page.rotation, overlay=True)
+                        rotate=page.rotation, overlay=True, oc=OC())
 
 
 # ---------------------------------------------------------------- text frame & resize
@@ -729,13 +737,13 @@ def bake_trafo(page, it, m):
     shape.draw_circle(P(c1.x(), c1.y()), rad)
     shape.draw_circle(P(c2.x(), c2.y()), rad)
     col = it.get("color") or TRAFO_COLOR
-    shape.finish(color=_rgb(col), width=PRINT_LINE_PT, closePath=False)
+    shape.finish(oc=OC(), color=_rgb(col), width=PRINT_LINE_PT, closePath=False)
     shape.commit()
     rect = pymupdf.Rect(r.left(), base - tsize * 1.05, r.right(), base + tsize * 0.45)
     html = (f'<div dir="rtl" style="font-family:sans-serif;font-size:{tsize * 0.98:.2f}pt;'
             f'line-height:1;color:{col};text-align:center">{trafo_text(it)}</div>')
     page.insert_htmlbox((rect * m).normalize() if page.rotation else rect, html,
-                        rotate=page.rotation, overlay=True)
+                        rotate=page.rotation, overlay=True, oc=OC())
 
 
 from annotations_extra import EXTRA  # noqa: E402  (צורות, סימנים וחותמות)

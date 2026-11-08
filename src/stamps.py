@@ -83,9 +83,25 @@ def load_file(slot, path):
     return True
 
 
+_extra = {}       # חותמות שנטענו מתוך קובץ PDF (מפתח -> PNG)
+
+
+def register(key, png):
+    _extra[key] = png
+    _masks.pop(key, None)
+
+
+def mask_png(slot):
+    """ה-PNG של מסכת החותמת (לשמירה בתוך הקובץ)."""
+    if slot in _extra:
+        return _extra[slot]
+    raw = _st().value(f"stamp{slot}", "")
+    return base64.b64decode(raw) if raw else b""
+
+
 def mask(slot):
     if slot not in _masks:
-        raw = _st().value(f"stamp{slot}", "")
+        raw = base64.b64encode(_extra[slot]).decode() if slot in _extra else _st().value(f"stamp{slot}", "")
         m = None
         if raw:
             g = QImage.fromData(base64.b64decode(raw), "PNG")

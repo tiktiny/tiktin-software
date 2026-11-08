@@ -167,27 +167,27 @@ def bake_shape(page, it, m):
     if k in LINEAR:
         a, b = _line_ends(it)
         sh.draw_line(P(*a), P(*b))
-        sh.finish(color=col, width=w, lineCap=0 if k != "line" else 1, closePath=False)
+        sh.finish(oc=A.OC(), color=col, width=w, lineCap=0 if k != "line" else 1, closePath=False)
         for tri in _heads(it):
             q = [P(*t) for t in tri]
             sh.draw_polyline(q + [q[0]])
-            sh.finish(color=None, fill=col, closePath=True)
+            sh.finish(oc=A.OC(), color=None, fill=col, closePath=True)
     elif k == "rect":
         r = shape_box(it)
         q = [P(r.left(), r.top()), P(r.right(), r.top()), P(r.right(), r.bottom()), P(r.left(), r.bottom())]
         sh.draw_polyline(q + [q[0]])
-        sh.finish(color=col, width=w, lineJoin=1, closePath=True)
+        sh.finish(oc=A.OC(), color=col, width=w, lineJoin=1, closePath=True)
     elif k == "ellipse":
         r = shape_box(it)
         rr = pymupdf.Rect(r.left(), r.top(), r.right(), r.bottom()) * m
         sh.draw_oval(rr.normalize())
-        sh.finish(color=col, width=w)
+        sh.finish(oc=A.OC(), color=col, width=w)
     elif k == "cloud":
         for a, c, b in cloud_arcs(it):
             c1 = (a[0] + 2 / 3 * (c[0] - a[0]), a[1] + 2 / 3 * (c[1] - a[1]))
             c2 = (b[0] + 2 / 3 * (c[0] - b[0]), b[1] + 2 / 3 * (c[1] - b[1]))
             sh.draw_bezier(P(*a), P(*c1), P(*c2), P(*b))
-        sh.finish(color=col, width=w, lineCap=1, lineJoin=1, closePath=False)
+        sh.finish(oc=A.OC(), color=col, width=w, lineCap=1, lineJoin=1, closePath=False)
     sh.commit()
 
 
@@ -285,16 +285,16 @@ def bake_mark(page, it, m):
     if k == "x":
         sh.draw_line(P(r.left(), r.top()), P(r.right(), r.bottom()))
         sh.draw_line(P(r.right(), r.top()), P(r.left(), r.bottom()))
-        sh.finish(color=col, width=lw, lineCap=1, closePath=False)
+        sh.finish(oc=A.OC(), color=col, width=lw, lineCap=1, closePath=False)
         sh.commit()
         return
     if k == "v":
         sh.draw_polyline([P(*q) for q in _v_pts(r)])
-        sh.finish(color=col, width=lw, lineCap=1, lineJoin=1, closePath=False)
+        sh.finish(oc=A.OC(), color=col, width=lw, lineCap=1, lineJoin=1, closePath=False)
         sh.commit()
         return
     sh.draw_circle(P(r.center().x(), r.center().y()), r.width() / 2)
-    sh.finish(color=col, fill=(1, 1, 1), width=lw)
+    sh.finish(oc=A.OC(), color=col, fill=(1, 1, 1), width=lw)
     sh.commit()
     c, h = _mark_text_geom(it)
     fs = h / 0.72
@@ -302,7 +302,7 @@ def bake_mark(page, it, m):
     html = (f'<div style="font-family:sans-serif;font-weight:bold;font-size:{fs:.2f}pt;line-height:1;'
             f'color:{_color(it)};text-align:center">{_mark_text(it)}</div>')
     page.insert_htmlbox((box * m).normalize() if page.rotation else box, html,
-                        rotate=page.rotation, overlay=True)
+                        rotate=page.rotation, overlay=True, oc=A.OC())
 
 
 def corner_handles(r):
@@ -356,7 +356,7 @@ def bake_stamp(page, it, m):
     if page.rotation:
         rect = (rect * m).normalize()
     page.insert_image(rect, stream=data, rotate=page.rotation, keep_proportion=False,
-                      overlay=True)
+                      overlay=True, oc=A.OC())
 
 
 def resize_stamp(it, orig, hh, pt):
@@ -500,7 +500,7 @@ def bake_text_path(page, m, text, cx, cy, height, angle, color):
         pts = [pymupdf.Point(q.x(), q.y()) * m for q in poly]
         if len(pts) >= 3:
             sh.draw_polyline(pts)
-    sh.finish(color=None, fill=A._rgb(color), even_odd=True, closePath=True)
+    sh.finish(oc=A.OC(), color=None, fill=A._rgb(color), even_odd=True, closePath=True)
     sh.commit()
 
 
@@ -541,7 +541,7 @@ def bake_rotated(page, it, m):
                             bb.top() + out.height() / scale)
         if page.rotation:
             rect = (rect * m).normalize()
-        page.insert_image(rect, stream=data, rotate=page.rotation, keep_proportion=False, overlay=True)
+        page.insert_image(rect, stream=data, rotate=page.rotation, keep_proportion=False, overlay=True, oc=A.OC())
         return
     sh = page.new_shape()
     if t == "shape":
@@ -552,7 +552,7 @@ def bake_rotated(page, it, m):
             q = [_P(m, tr, r.left(), r.top()), _P(m, tr, r.right(), r.top()),
                  _P(m, tr, r.right(), r.bottom()), _P(m, tr, r.left(), r.bottom())]
             sh.draw_polyline(q + [q[0]])
-            sh.finish(color=rgb, width=w, lineJoin=1, closePath=True)
+            sh.finish(oc=A.OC(), color=rgb, width=w, lineJoin=1, closePath=True)
         elif k == "ellipse":
             cx, cy, a, b = r.center().x(), r.center().y(), r.width() / 2, r.height() / 2
             kk = 0.5523
@@ -560,13 +560,13 @@ def bake_rotated(page, it, m):
                     ((-a, 0), (-a, -kk * b), (-kk * a, -b), (0, -b)), ((0, -b), (kk * a, -b), (a, -kk * b), (a, 0))]
             for s4 in segs:
                 sh.draw_bezier(*[_P(m, tr, cx + x, cy + y) for x, y in s4])
-            sh.finish(color=rgb, width=w, closePath=False)
+            sh.finish(oc=A.OC(), color=rgb, width=w, closePath=False)
         else:
             for a_, c_, b_ in cloud_arcs(it):
                 c1 = (a_[0] + 2 / 3 * (c_[0] - a_[0]), a_[1] + 2 / 3 * (c_[1] - a_[1]))
                 c2 = (b_[0] + 2 / 3 * (c_[0] - b_[0]), b_[1] + 2 / 3 * (c_[1] - b_[1]))
                 sh.draw_bezier(_P(m, tr, *a_), _P(m, tr, *c1), _P(m, tr, *c2), _P(m, tr, *b_))
-            sh.finish(color=rgb, width=w, lineCap=1, lineJoin=1, closePath=False)
+            sh.finish(oc=A.OC(), color=rgb, width=w, lineCap=1, lineJoin=1, closePath=False)
         sh.commit()
         return
     if t == "mark":
@@ -576,17 +576,17 @@ def bake_rotated(page, it, m):
         if k == "x":
             sh.draw_line(_P(m, tr, r.left(), r.top()), _P(m, tr, r.right(), r.bottom()))
             sh.draw_line(_P(m, tr, r.right(), r.top()), _P(m, tr, r.left(), r.bottom()))
-            sh.finish(color=rgb, width=lw, lineCap=1, closePath=False)
+            sh.finish(oc=A.OC(), color=rgb, width=lw, lineCap=1, closePath=False)
             sh.commit()
             return
         if k == "v":
             sh.draw_polyline([_P(m, tr, *q) for q in _v_pts(r)])
-            sh.finish(color=rgb, width=lw, lineCap=1, lineJoin=1, closePath=False)
+            sh.finish(oc=A.OC(), color=rgb, width=lw, lineCap=1, lineJoin=1, closePath=False)
             sh.commit()
             return
         c = r.center()
         sh.draw_circle(_P(m, tr, c.x(), c.y()), r.width() / 2)
-        sh.finish(color=rgb, fill=(1, 1, 1), width=lw)
+        sh.finish(oc=A.OC(), color=rgb, fill=(1, 1, 1), width=lw)
         sh.commit()
         cc, h = _mark_text_geom(it)
         bake_text_path(page, m, _mark_text(it), cc.x(), cc.y(), h, it.get("angle", 0.0), col)
@@ -598,7 +598,7 @@ def bake_rotated(page, it, m):
         sh.draw_polyline(q + [q[0]])
         sh.draw_circle(_P(m, tr, c1.x(), c1.y()), rad)
         sh.draw_circle(_P(m, tr, c2.x(), c2.y()), rad)
-        sh.finish(color=rgb, width=A.PRINT_LINE_PT, closePath=False)
+        sh.finish(oc=A.OC(), color=rgb, width=A.PRINT_LINE_PT, closePath=False)
         sh.commit()
         path = A._text_path(A.trafo_text(it))
         br = path.boundingRect()

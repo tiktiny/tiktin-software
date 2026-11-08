@@ -25,7 +25,7 @@ class ColorButton(QToolButton):
     def __init__(self, color="#d0021b"):
         super().__init__()
         self.setObjectName("tb")
-        self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.setToolTip("צבע לכל הסימונים, לטקסט ולחותמות — לחיצה מחליפה בין אדום לשחור")
         self.clicked.connect(self._toggle)
         self.set_color(color, emit=False)

@@ -5,6 +5,19 @@ from collections import OrderedDict
 DL_CACHE_PAGES = 4
 
 
+def _hide_marks_layer(doc):
+    """סימוני טיקטין שנשמרו בקובץ מוצגים לעריכה מעל השרטוט, לכן העותק הצרוב מוסתר."""
+    try:
+        t, _ = doc.xref_get_key(doc.pdf_catalog(), "TiktinMarks")
+        if t != "xref":
+            return
+        for c in doc.layer_ui_configs():
+            if c.get("text") == "Tiktin marks":
+                doc.set_layer_ui_config(c["number"], action=2)
+    except Exception:
+        pass
+
+
 def worker_main(job_conn, res_conn, wid):
     import pymupdf
     # קווים דקים מאוד (hairline) מצוירים ברוחב פיקסל אחד לפחות, כמו ב-Foxit,
@@ -42,6 +55,7 @@ def worker_main(job_conn, res_conn, wid):
                 doc = pymupdf.open(path)
                 if doc.needs_pass:
                     doc.authenticate(pw or "")
+                _hide_marks_layer(doc)
                 doc_key = (path, pw)
             dl = dls.get(pno)
             if dl is None:

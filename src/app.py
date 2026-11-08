@@ -35,6 +35,7 @@ import annotations_extra as AX
 import stamps
 from scale_detect import analyzer_main
 from cliptray import ClipTray, TRAY_STYLE
+import marks_store
 
 APP_NAME = "טיקטין PDF"
 TILE = 512                 # גודל אריח בפיקסלים של המסך
@@ -1680,8 +1681,7 @@ class MainWindow(QMainWindow):
         self.tray.message.connect(lambda m: self.statusBar().showMessage(m, 7000))
         self.view.tray = self.tray
         self._build_toolbar()
-        self.view.wheel_zoom = self.settings.value("wheel_zoom", False, type=bool)
-        self.wheel_act.setChecked(self.view.wheel_zoom)
+        self.view.wheel_zoom = False
         g = self.settings.value("geometry")
         if g is not None:
             self.restoreGeometry(g)
@@ -1727,6 +1727,20 @@ class MainWindow(QMainWindow):
             a.setShortcutVisibleInContextMenu(True)
         return a
 
+    @staticmethod
+    def _glyph_icon(ch):
+        pm = QPixmap(36, 36)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        f = QFont("Segoe UI Symbol")
+        f.setPixelSize(30)
+        p.setFont(f)
+        p.setPen(QColor("#1f2630"))
+        p.drawText(pm.rect(), Qt.AlignCenter, ch)
+        p.end()
+        return QIcon(pm)
+
     def _build_toolbar(self):
         tb = QToolBar()
         tb.setMovable(False)
@@ -1736,7 +1750,7 @@ class MainWindow(QMainWindow):
         logo = QLabel()
         pm = QPixmap()
         pm.loadFromData(base64.b64decode(LOGO_B64))
-        logo.setPixmap(pm.scaledToHeight(38, Qt.SmoothTransformation))
+        logo.setPixmap(pm.scaledToHeight(34, Qt.SmoothTransformation))
         logo.setContentsMargins(4, 0, 8, 0)
         tb.addWidget(logo)
         tb.addWidget(self._btn("פתיחה", "פתיחת קובץ PDF (Ctrl+O)", self.open_dialog, primary=True))
@@ -1818,8 +1832,18 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
 
         # ----- עריכה וצבע
-        tb.addWidget(self._btn("↶", "ביטול הפעולה האחרונה (Ctrl+Z)", self.view.do_undo))
-        tb.addWidget(self._btn("↷", "חזרה על הפעולה שבוטלה (Ctrl+Y)", self.view.do_redo))
+        for arrow, word, tip, fn in (("↶", "UNDO", "ביטול הפעולה האחרונה (Ctrl+Z)", self.view.do_undo),
+                                     ("↷", "REDO", "חזרה על הפעולה שבוטלה (Ctrl+Y)", self.view.do_redo)):
+            b = QToolButton()
+            b.setObjectName("tbur")
+            b.setToolTip(tip)
+            b.setText(word)
+            b.setIcon(self._glyph_icon(arrow))
+            b.setIconSize(QSize(16, 16))
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            b.setLayoutDirection(Qt.LeftToRight)
+            b.clicked.connect(fn)
+            tb.addWidget(b)
         self.del_btn = self._btn("✕", "מחיקת הסימון שנבחר (Delete)", self.view.delete_selected)
         tb.addWidget(self.del_btn)
         self.color_btn = ColorButton(self.view.pen_color)
@@ -2020,7 +2044,6 @@ class MainWindow(QMainWindow):
 
     def _wheel_mode(self, on):
         self.view.wheel_zoom = on
-        self.settings.setValue("wheel_zoom", on)
 
     def _zoom_text(self, t):
         try:
@@ -2155,6 +2178,8 @@ class MainWindow(QMainWindow):
         v = self.view
         one = pymupdf.open()
         one.insert_pdf(v.doc, from_page=i, to_page=i)
+        if marks_store.has_marks(v.doc):
+            marks_store.strip_page(one, one[0])
         if v.items.get(i):
             A.bake_page(one[0], v.items[i], v.scale_of(i))
         out = pymupdf.open()
@@ -2212,7 +2237,7 @@ class MainWindow(QMainWindow):
     # ----- save
     def _has_changes(self):
         v = self.view
-        return v.has_items() or v.pages_changed
+        return v.dirty or v.has_items() or v.pages_changed
 
     def save_as(self):
         v = self.view
@@ -2243,7 +2268,7 @@ class MainWindow(QMainWindow):
             box.setWindowTitle(APP_NAME)
             box.setIcon(QMessageBox.Question)
             box.setText("השינויים יישמרו בתוך הקובץ:\n" + os.path.basename(v.path) +
-                        "\n\nהתוספות ייטמעו בקובץ ולא יהיה אפשר לערוך אותן אחר כך. להמשיך?")
+                        "\n\nהסימונים יופיעו בכל תוכנה, ובטיקטין PDF אפשר יהיה לחזור ולשנות או למחוק אותם. להמשיך?")
             from PySide6.QtWidgets import QCheckBox
             cb = QCheckBox("לא לשאול שוב")
             box.setCheckBox(cb)
@@ -2270,10 +2295,10 @@ class MainWindow(QMainWindow):
             doc2 = pymupdf.open(v.src)
             if doc2.needs_pass:
                 doc2.authenticate(v.pw or "")
-            for i, items in v.items.items():
-                if items and i < doc2.page_count:
-                    A.bake_page(doc2[i], items, v.scale_of(i))
-            doc2.save(tmp, garbage=1, deflate=True)
+            scales = {i: v.scale_of(i) for i, items in v.items.items() if items}
+            marks_store.save(doc2, v.items, scales)
+            # garbage=3: מאחד גופנים ותמונות כפולים, כך שהקובץ לא גדל משמירה לשמירה
+            doc2.save(tmp, garbage=3, deflate=True)
             doc2.close()
             if same:
                 v.pool.close_docs()
@@ -2402,8 +2427,29 @@ class MainWindow(QMainWindow):
             return
         self.settings.setValue("last_dir", os.path.dirname(path))
         self.setWindowTitle(f"{os.path.basename(path)} – {APP_NAME}")
-        self.view.open_doc(doc, path, pw)
-        self.view.setFocus()
+        loaded = None
+        try:
+            loaded = marks_store.load(doc)
+        except Exception:
+            loaded = None
+        marks_store.hide_layer(doc)
+        v = self.view
+        v.open_doc(doc, path, pw)
+        if loaded:
+            items, scales = loaded
+            v.items = items
+            for k, S in scales.items():
+                v.scales.setdefault(k, S)
+            n = sum(len(x) for x in items.values())
+            if n:
+                self.statusBar().showMessage(f"נטענו {n} סימונים מהקובץ — אפשר לגרור, לשנות ולמחוק אותם", 7000)
+            v.viewport().update()
+        # בפתיחת קובץ: הגלגלת גוללת, Ctrl+גלגלת מגדיל ומקטין
+        v.wheel_zoom = False
+        self.wheel_act.blockSignals(True)
+        self.wheel_act.setChecked(False)
+        self.wheel_act.blockSignals(False)
+        v.setFocus()
 
     def dragEnterEvent(self, ev):
         if ev.mimeData().hasUrls():
@@ -2430,6 +2476,9 @@ QToolBar {{ background: #ffffff; border: none; border-bottom: 1px solid #d4d8de;
 QToolButton#tb {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
                   padding: 0 8px; min-height: 30px; max-height: 30px; font-size: 10pt; }}
 QToolButton#tb::menu-indicator {{ image: none; width: 0; }}
+QToolButton#tbur {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
+                    padding: 0 4px; min-height: 30px; max-height: 30px; font-size: 7.5pt; }}
+QToolButton#tbur:hover {{ background: #f2f4f7; }}
 QToolButton#tb:hover {{ background: #f2f4f7; }}
 QToolButton#tb:checked {{ background: #fbe9eb; border-color: {ACCENT}; color: {ACCENT}; }}
 QToolButton#primary {{ color: #ffffff; background: {ACCENT}; border: 1px solid {ACCENT}; border-radius: 4px;
