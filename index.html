@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>תוכנות טיקטין חשמל</title>
+<meta name="description" content="תוכנות להתקנה במחשב של משרד טיקטין – תכנון חשמל.">
+<meta name="theme-color" content="#17364c">
+<link rel="icon" href="https://tiktiny.github.io/tiktin-tools/icons/tiktin-192.png">
+<style>
+:root{color-scheme:light;--ink:#17364c;--muted:#596b77;--red:#c42635;--line:#dde5e9;--z:1}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:#f3f6f8;color:var(--ink);font-family:Arial,"Segoe UI",sans-serif;font-size:16px;line-height:1.5;display:flex;flex-direction:column}
+header{background:#fff;border-bottom:1px solid var(--line);flex:0 0 auto}
+.head{padding:12px 24px;display:flex;align-items:center;gap:22px}
+.logo{width:126px;max-height:55px;object-fit:contain}
+.brand{border-right:1px solid var(--line);padding-right:22px;flex:1;min-width:0}
+.brand h1{font-size:26px;margin:0;line-height:1.3}
+.brand p{margin:0;color:var(--muted);font-size:14px}
+.zoom{display:flex;gap:6px;align-items:center}
+.zoom button{height:34px;min-width:38px;padding:0 10px;border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:6px;font-size:15px;cursor:pointer}
+.zoom button:hover{background:#f2f6f8}
+.ver{font-size:12px;color:var(--muted);white-space:nowrap}
+main{flex:1;min-height:0;overflow:auto;padding:22px 24px}
+.wrap{zoom:var(--z)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:18px}
+.card{background:#fff;border:1px solid var(--line);border-top:4px solid var(--red);border-radius:12px;padding:22px;display:flex;flex-direction:column;gap:12px}
+.top{display:flex;gap:16px;align-items:center}
+.icon{width:64px;height:64px;flex-shrink:0}
+.card h3{font-size:24px;font-weight:800;margin:0;line-height:1.25}
+.card .sub{color:var(--muted);font-size:13px}
+.card p{margin:0;font-size:15px;line-height:1.45}
+.dl{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:44px;padding:0 22px;background:var(--red);color:#fff;border-radius:8px;text-decoration:none;font-weight:700;font-size:16px;align-self:flex-start}
+.dl:hover{background:#a51e2b}
+details{border-top:1px solid var(--line);padding-top:10px}
+summary{cursor:pointer;color:var(--ink);font-size:14px;font-weight:700}
+details ol{margin:8px 0 0;padding-right:20px;font-size:14px;color:#33505f}
+details li{margin-bottom:4px}
+@media(max-width:650px){.head{padding:10px 12px;gap:12px}.logo{width:86px}.brand{padding-right:12px}.brand h1{font-size:20px}.brand p{font-size:12px}.zoom{display:none}main{padding:12px}}
+</style>
+</head>
+<body>
+<header><div class="head">
+ <img class="logo" src="https://tiktiny.github.io/tiktin-tools/tiktin-logo.png" alt="טיקטין">
+ <div class="brand"><h1>תוכנות טיקטין חשמל</h1><p>תוכנות להתקנה במחשב של משרד טיקטין · <span class="ver">גרסה V1 · 08.11.2026</span></p></div>
+ <div class="zoom">
+  <button id="zo" title="הקטנה">−</button><button id="zi" title="הגדלה">+</button><button id="zf" title="התאמה למסך">התאמה למסך</button>
+ </div>
+</div></header>
+<main><div class="wrap"><div class="grid">
+
+ <div class="card">
+  <div class="top">
+   <svg class="icon" viewBox="0 0 32 32"><defs><linearGradient id="tkg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#cf2030"/><stop offset="1" stop-color="#f58220"/></linearGradient></defs><rect x="1" y="1" width="30" height="30" rx="6" fill="url(#tkg)"/><path d="M18.2 3.2 11.6 12.4h4.2l-2.6 5.4 7.4-8.6h-4.4z" fill="#fff"/><text x="16" y="27.2" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-weight="700" font-size="9.6" fill="#fff">PDF</text></svg>
+   <div><h3>טיקטין PDF</h3><div class="sub">ל-Windows · גרסה 1.3.0 · 08.11.2026</div></div>
+  </div>
+  <p>פתיחה, זום וגלילה מהירים בשרטוטים כבדים, מדידה בס״מ, סימון חורים, עט, טקסט בעברית, העתקת חלון לתוכנה אחרת והדפסה עם תצוגה מקדימה.</p>
+  <a class="dl" href="https://github.com/tiktiny/tiktin-software/releases/latest/download/TiktinPDF-Setup.exe">הורדה והתקנה</a>
+  <details><summary>איך מתקינים</summary><ol>
+   <li>לוחצים „הורדה והתקנה” ופותחים את הקובץ שירד.</li>
+   <li>אם מופיעה אזהרה כחולה של Windows: „מידע נוסף” ואז „הפעל בכל זאת”.</li>
+   <li>ההתקנה לא דורשת הרשאות מנהל. בסופה יש קיצור דרך „טיקטין PDF” בשולחן העבודה.</li>
+   <li>לפתיחת קובצי PDF בלחיצה כפולה: קליק ימני על קובץ PDF ← „פתח באמצעות” ← „טיקטין PDF” ← „השתמש תמיד”.</li>
+   <li>לעדכון לגרסה חדשה פשוט מתקינים שוב מכאן, מעל הגרסה הקיימת.</li>
+  </ol></details>
+ </div>
+
+</div></div></main>
+<script>
+(function(){var z=1,r=document.documentElement;function s(v){z=Math.min(2,Math.max(.5,v));r.style.setProperty('--z',z)}
+document.getElementById('zi').onclick=function(){s(z+.1)};document.getElementById('zo').onclick=function(){s(z-.1)};
+document.getElementById('zf').onclick=function(){s(1);var m=document.querySelector('main'),w=document.querySelector('.wrap');var k=Math.min(m.clientWidth/w.scrollWidth,(m.clientHeight-10)/w.scrollHeight);s(Math.min(2,Math.max(.5,k)))};})();
+</script>
+</body>
+</html>
