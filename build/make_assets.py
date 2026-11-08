@@ -37,15 +37,21 @@ def bold_font(size):
     return ImageFont.load_default(size)
 
 
-d = ImageDraw.Draw(bg)
 t = "PDF"
+d = ImageDraw.Draw(bg)
 font = bold_font(400)
 bb = d.textbbox((0, 0), t, font=font)
 font = bold_font(int(400 * S * 0.94 / (bb[2] - bb[0])))
 bb = d.textbbox((0, 0), t, font=font)
 tw, th = bb[2] - bb[0], bb[3] - bb[1]
-d.text(((S - tw) / 2 - bb[0], (S - th) / 2 - bb[1]), t, font=font,
-       fill=(255, 255, 255, 255), stroke_width=30, stroke_fill=(0, 0, 0, 255))
+pos = ((S - tw) / 2 - bb[0], (S - th) / 2 - bb[1])
+# קו מתאר שחור, ובתוכו האותיות: חצי שמאלי אדום וחצי ימני כתום (כמו הברק בלוגו)
+d.text(pos, t, font=font, fill=(0, 0, 0, 255), stroke_width=30, stroke_fill=(0, 0, 0, 255))
+mask = Image.new("L", (S, S), 0)
+ImageDraw.Draw(mask).text(pos, t, font=font, fill=255)
+fill = Image.new("RGBA", (S, S), (214, 32, 40, 255))
+fill.paste((243, 112, 33, 255), (S // 2, 0, S, S))
+bg.paste(fill, (0, 0), mask)
 ic = bg.resize((256, 256), Image.LANCZOS)
 ic.save(out_ico, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
 ic.save(os.path.splitext(out_ico)[0] + ".png")
