@@ -123,6 +123,9 @@ def label_rect(it, S):
 
 
 def item_bbox(it, S):
+    if it.get("angle") and it["type"] != "hole":
+        from annotations_extra import rot_bbox
+        return rot_bbox(it)
     if it["type"] in EXTRA:
         return EXTRA[it["type"]]["bbox"](it)
     if it["type"] == "trafo":
@@ -135,6 +138,9 @@ def item_bbox(it, S):
 
 
 def hit(it, pt, S, tol):
+    if it.get("angle") and it["type"] != "hole":
+        from annotations_extra import to_local
+        pt = to_local(it, pt)
     if it["type"] in EXTRA:
         return EXTRA[it["type"]]["hit"](it, pt, tol)
     if it["type"] == "trafo":
@@ -214,6 +220,22 @@ def _draw_label(p, it, S, color, white_bg):
 
 
 def paint_item(p, it, S, cosmetic=True, selected=False, ghost=False):
+    if it.get("angle") and it["type"] not in ("hole", "dim", "ink", "text"):
+        from annotations_extra import xform
+        p.save()
+        p.setTransform(xform(it), True)
+        r = dict(it)
+        r["angle"] = 0.0
+        paint_item(p, r, S, cosmetic, False, ghost)
+        p.restore()
+        if selected:
+            p.save()
+            p.setPen(_pen(SEL_COLOR, cosmetic, True, 1.2))
+            p.setBrush(Qt.NoBrush)
+            from annotations_extra import _base_bbox
+            p.drawPolygon(xform(it).map(QPolygonF(_base_bbox(it).adjusted(-1.5, -1.5, 1.5, 1.5))))
+            p.restore()
+        return
     if it["type"] in EXTRA:
         p.save()
         if ghost:
@@ -356,6 +378,10 @@ def bake_page(page, items, S):
     for it in items:
         if it["type"] == "ink":
             continue
+        if it.get("angle") and it["type"] in ("trafo", "mark", "stamp", "shape"):
+            from annotations_extra import bake_rotated
+            bake_rotated(page, it, m)
+            continue
         if it["type"] == "text":
             bake_text(page, it, m)
             continue
@@ -438,6 +464,8 @@ def handle_cursor(it, hh):
     sx, sy = hh
     if sx == "e":
         return Qt.CrossCursor
+    if sx == "r":
+        return Qt.PointingHandCursor
     ang = it.get("angle", 0.0) % 180
     swap = 45 <= ang < 135
     if sx and sy:

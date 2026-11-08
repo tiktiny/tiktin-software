@@ -385,3 +385,225 @@ EXTRA = {
     "stamp": {"bbox": stamp_rect, "hit": _rect_hit(stamp_rect), "paint": paint_stamp, "bake": bake_stamp,
               "handles": lambda it: corner_handles(stamp_rect(it)), "resize": resize_stamp},
 }
+
+
+# ================================================================ rotation (סיבוב סימנים וצורות)
+from PySide6.QtGui import QTransform  # noqa: E402
+
+BOX_SHAPES = ("rect", "ellipse", "cloud")
+
+
+def rotatable(it):
+    t = it["type"]
+    return t in ("trafo", "mark", "stamp") or (t == "shape" and it["kind"] in BOX_SHAPES)
+
+
+def center(it):
+    if it["type"] == "shape":
+        return shape_box(it).center()
+    return QPointF(*it["c"])
+
+
+def _base_bbox(it):
+    t = it["type"]
+    if t == "trafo":
+        return A.trafo_rect(it)
+    if t == "shape":
+        return shape_bbox(it)
+    return EXTRA[t]["bbox"](it) if t in EXTRA else A.trafo_rect(it)
+
+
+def xform(it):
+    """מטריצת הסיבוב סביב מרכז הסימן."""
+    c = center(it)
+    tr = QTransform()
+    tr.translate(c.x(), c.y())
+    tr.rotate(it.get("angle", 0.0))
+    tr.translate(-c.x(), -c.y())
+    return tr
+
+
+def to_local(it, pt):
+    a = it.get("angle", 0.0)
+    if not a:
+        return pt
+    inv, _ = xform(it).inverted()
+    return inv.map(pt)
+
+
+def to_world(it, pt):
+    a = it.get("angle", 0.0)
+    return xform(it).map(pt) if a else pt
+
+
+def rot_bbox(it):
+    r = _base_bbox(it)
+    if not it.get("angle", 0.0):
+        return r
+    return xform(it).map(QPolygonF(r)).boundingRect()
+
+
+def rot_handles(base_handles, it):
+    return [(to_world(it, loc), hh) for loc, hh in base_handles]
+
+
+def rot_handle_pos(it, offset):
+    """ידית הסיבוב: מעל מרכז הצלע העליונה."""
+    r = _base_bbox(it)
+    return to_world(it, QPointF(r.center().x(), r.top() - offset))
+
+
+def apply_rotation_drag(it, pt, snap=5.0):
+    c = center(it)
+    ang = math.degrees(math.atan2(pt.y() - c.y(), pt.x() - c.x())) + 90.0
+    ang = round(ang / snap) * snap % 360
+    it["angle"] = 0.0 if abs(ang) < 1e-6 or abs(ang - 360) < 1e-6 else ang
+
+
+def rotated_resize(base_resize, it, orig, hh, pt):
+    """גרירת ידית של סימן מסובב: מחשבים במערכת המקומית ואז מחזירים את המרכז לעולם."""
+    a = orig.get("angle", 0.0)
+    if not a:
+        base_resize(it, orig, hh, pt)
+        return
+    c0 = center(orig)
+    local = to_local(orig, pt)
+    base_resize(it, orig, hh, local)
+    c1 = center(it)                         # מרכז חדש, במערכת המקומית סביב c0
+    tr = QTransform()
+    tr.translate(c0.x(), c0.y())
+    tr.rotate(a)
+    tr.translate(-c0.x(), -c0.y())
+    w = tr.map(c1)
+    dx, dy = w.x() - c1.x(), w.y() - c1.y()
+    if it["type"] == "shape":
+        it["p1"] = (it["p1"][0] + dx, it["p1"][1] + dy)
+        it["p2"] = (it["p2"][0] + dx, it["p2"][1] + dy)
+    else:
+        it["c"] = (it["c"][0] + dx, it["c"][1] + dy)
+    it["angle"] = a
+
+
+# ----- baking rotated items: הכול וקטורי, גם הטקסט (כקווי מתאר)
+def bake_text_path(page, m, text, cx, cy, height, angle, color):
+    import pymupdf
+    path = A._text_path(text)
+    br = path.boundingRect()
+    k = height / max(1.0, br.height())
+    tr = QTransform()
+    tr.translate(cx, cy)
+    tr.rotate(angle)
+    tr.scale(k, k)
+    tr.translate(-br.center().x(), -br.center().y())
+    sh = page.new_shape()
+    for poly in tr.map(path).toSubpathPolygons():
+        pts = [pymupdf.Point(q.x(), q.y()) * m for q in poly]
+        if len(pts) >= 3:
+            sh.draw_polyline(pts)
+    sh.finish(color=None, fill=A._rgb(color), even_odd=True, closePath=True)
+    sh.commit()
+
+
+def _P(m, tr, x, y):
+    import pymupdf
+    q = tr.map(QPointF(x, y))
+    return pymupdf.Point(q.x(), q.y()) * m
+
+
+def bake_rotated(page, it, m):
+    """צריבה של סימן מסובב (זווית שאינה 0)."""
+    import pymupdf
+    tr = xform(it)
+    col = _color(it)
+    rgb = A._rgb(col)
+    t = it["type"]
+    if t == "stamp":
+        import stamps
+        img = stamps.colored(it["slot"], col)
+        if img is None:
+            return
+        r = stamp_rect(it)
+        bb = rot_bbox(it)
+        scale = img.width() / max(1e-6, r.width())
+        from PySide6.QtGui import QImage, QPainter
+        out = QImage(int(bb.width() * scale) + 2, int(bb.height() * scale) + 2,
+                     QImage.Format_ARGB32_Premultiplied)
+        out.fill(0)
+        p = QPainter(out)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.scale(scale, scale)
+        p.translate(-bb.left(), -bb.top())
+        p.setTransform(tr, True)
+        p.drawImage(r, img)
+        p.end()
+        data = stamps._to_png(out.convertToFormat(QImage.Format_ARGB32))
+        rect = pymupdf.Rect(bb.left(), bb.top(), bb.left() + out.width() / scale,
+                            bb.top() + out.height() / scale)
+        if page.rotation:
+            rect = (rect * m).normalize()
+        page.insert_image(rect, stream=data, rotate=page.rotation, keep_proportion=False, overlay=True)
+        return
+    sh = page.new_shape()
+    if t == "shape":
+        k = it["kind"]
+        r = shape_box(it)
+        w = _wpt(it)
+        if k == "rect":
+            q = [_P(m, tr, r.left(), r.top()), _P(m, tr, r.right(), r.top()),
+                 _P(m, tr, r.right(), r.bottom()), _P(m, tr, r.left(), r.bottom())]
+            sh.draw_polyline(q + [q[0]])
+            sh.finish(color=rgb, width=w, lineJoin=1, closePath=True)
+        elif k == "ellipse":
+            cx, cy, a, b = r.center().x(), r.center().y(), r.width() / 2, r.height() / 2
+            kk = 0.5523
+            segs = [((a, 0), (a, kk * b), (kk * a, b), (0, b)), ((0, b), (-kk * a, b), (-a, kk * b), (-a, 0)),
+                    ((-a, 0), (-a, -kk * b), (-kk * a, -b), (0, -b)), ((0, -b), (kk * a, -b), (a, -kk * b), (a, 0))]
+            for s4 in segs:
+                sh.draw_bezier(*[_P(m, tr, cx + x, cy + y) for x, y in s4])
+            sh.finish(color=rgb, width=w, closePath=False)
+        else:
+            for a_, c_, b_ in cloud_arcs(it):
+                c1 = (a_[0] + 2 / 3 * (c_[0] - a_[0]), a_[1] + 2 / 3 * (c_[1] - a_[1]))
+                c2 = (b_[0] + 2 / 3 * (c_[0] - b_[0]), b_[1] + 2 / 3 * (c_[1] - b_[1]))
+                sh.draw_bezier(_P(m, tr, *a_), _P(m, tr, *c1), _P(m, tr, *c2), _P(m, tr, *b_))
+            sh.finish(color=rgb, width=w, lineCap=1, lineJoin=1, closePath=False)
+        sh.commit()
+        return
+    if t == "mark":
+        r = mark_rect(it)
+        lw = _mark_lw(it)
+        k = it["kind"]
+        if k == "x":
+            sh.draw_line(_P(m, tr, r.left(), r.top()), _P(m, tr, r.right(), r.bottom()))
+            sh.draw_line(_P(m, tr, r.right(), r.top()), _P(m, tr, r.left(), r.bottom()))
+            sh.finish(color=rgb, width=lw, lineCap=1, closePath=False)
+            sh.commit()
+            return
+        if k == "v":
+            sh.draw_polyline([_P(m, tr, *q) for q in _v_pts(r)])
+            sh.finish(color=rgb, width=lw, lineCap=1, lineJoin=1, closePath=False)
+            sh.commit()
+            return
+        c = r.center()
+        sh.draw_circle(_P(m, tr, c.x(), c.y()), r.width() / 2)
+        sh.finish(color=rgb, fill=(1, 1, 1), width=lw)
+        sh.commit()
+        cc, h = _mark_text_geom(it)
+        bake_text_path(page, m, _mark_text(it), cc.x(), cc.y(), h, it.get("angle", 0.0), col)
+        return
+    if t == "trafo":
+        r, rad, c1, c2, tsize, base = A.trafo_parts(it)
+        q = [_P(m, tr, r.left(), r.top()), _P(m, tr, r.right(), r.top()),
+             _P(m, tr, r.right(), r.bottom()), _P(m, tr, r.left(), r.bottom())]
+        sh.draw_polyline(q + [q[0]])
+        sh.draw_circle(_P(m, tr, c1.x(), c1.y()), rad)
+        sh.draw_circle(_P(m, tr, c2.x(), c2.y()), rad)
+        sh.finish(color=rgb, width=A.PRINT_LINE_PT, closePath=False)
+        sh.commit()
+        path = A._text_path(A.trafo_text(it))
+        br = path.boundingRect()
+        h = br.height() * tsize / 100.0
+        # מרכז הטקסט: הבסיס + מרכז האותיות
+        ty = base + (br.center().y()) * tsize / 100.0
+        tc = tr.map(QPointF(r.center().x(), ty))
+        bake_text_path(page, m, A.trafo_text(it), tc.x(), tc.y(), h, it.get("angle", 0.0), col)
