@@ -31,6 +31,7 @@ from text_dialog import HebrewKeyboard
 from inline_text import InlineText
 from colors import ColorButton
 from help_dialog import HelpDialog
+from rotate_dialog import RotateDialog
 import annotations as A
 from annotations_extra import EXTRA, SHAPE_NAMES, MARK_NAMES
 import annotations_extra as AX
@@ -1063,7 +1064,9 @@ class PdfView(QAbstractScrollArea):
         if r.get("pts"):
             r["pts"] = [f(q) for q in r["pts"]]
         # סימונים בגודל קבוע סביב מרכז מקבלים עוד 90° בזווית; סימונים שמוגדרים בנקודות מסתובבים עם הנקודות
-        if r.get("type") in ("trafo", "mark", "stamp", "hole"):
+        # מספור וסימן שאלה נשארים ישרים וקריאים; טקסט חופשי תמיד ישר
+        upright_mark = r.get("type") == "mark" and r.get("kind") in ("num", "q")
+        if r.get("type") in ("trafo", "mark", "stamp", "hole") and not upright_mark:
             a = (r.get("angle", 0.0) + d) % 360
             r["angle"] = 0.0 if abs(a) < 1e-6 else a
         return r
@@ -1098,7 +1101,7 @@ class PdfView(QAbstractScrollArea):
         best = max((0, 90, 180, 270), key=score)
         return (best - cur) % 360
 
-    def _orient_delta(self, i, landscape):
+    def _orient_delta(self, i, landscape, direction="cw"):
         """כמה לסובב את עמוד i כדי שיהיה לרוחב/לאורך והטקסט בו לא יהיה הפוך."""
         pg = self.doc[i]
         cur = pg.rotation % 360
@@ -1106,6 +1109,11 @@ class PdfView(QAbstractScrollArea):
         wide0 = r0.width > r0.height + 0.5
         cands = [R for R in (0, 90, 180, 270) if (wide0 if R in (0, 180) else not wide0) == landscape]
         wts = self._text_weights(i)
+        if not any(wts.values()):
+            # אין טקסט לזיהוי: רק משנים לאורך/לרוחב, לכיוון שנבחר
+            if cur in cands:
+                return 0
+            return 90 if direction == "cw" else 270
 
         def score(R):
             # טקסט ישר = +1, אנכי = 0, הפוך = -1
@@ -1117,28 +1125,32 @@ class PdfView(QAbstractScrollArea):
         best = max(cands, key=score)
         return (best - cur) % 360
 
-    def rotate_pages(self, pages, mode):
-        """mode: cw / ccw / portrait / landscape. מחזיר כמה עמודים סובבו.
+    def rotate_pages(self, pages, mode, direction="cw"):
+        """mode: rot90 / flip / portrait / landscape / upright (וגם cw / ccw).
+        מחזיר (כמה עמודים סובבו, עמודים שאין בהם טקסט לזיהוי הכיוון).
         הקובץ המקורי לא משתנה עד "שמירת שינויים"."""
         import tempfile
         import uuid
+        if mode in ("cw", "ccw"):
+            mode, direction = "rot90", mode
         todo = {}
+        notext = []
         for i in sorted(set(p for p in pages if 0 <= p < len(self.sizes))):
-            w, h = self.sizes[i]
-            if mode == "cw":
-                todo[i] = 90
-            elif mode == "ccw":
-                todo[i] = -90
-            elif mode == "upright":
-                dlt = self._upright_delta(i)
-                if dlt:
-                    todo[i] = dlt
-            elif mode in ("portrait", "landscape"):
-                dlt = self._orient_delta(i, mode == "landscape")
+            if mode == "rot90":
+                todo[i] = 90 if direction == "cw" else -90
+            elif mode == "flip":
+                todo[i] = 180
+            else:
+                if not any(self._text_weights(i).values()):
+                    notext.append(i)
+                if mode == "upright":
+                    dlt = self._upright_delta(i)
+                else:
+                    dlt = self._orient_delta(i, mode == "landscape", direction)
                 if dlt:
                     todo[i] = dlt
         if not todo:
-            return 0
+            return 0, notext
         if self.editor:
             self.finish_text_edit()
         st = self._page_state()
@@ -1177,7 +1189,7 @@ class PdfView(QAbstractScrollArea):
         self.changed.emit()
         self.go_page(min(cur, len(self.sizes) - 1))
         self.viewport().update()
-        return len(todo)
+        return len(todo), notext
 
     def delete_selected(self):
         if self.selected:
@@ -1974,15 +1986,21 @@ class MainWindow(QMainWindow):
                                               "טקסט, עט וחותמות", am, checkable=True)
         tb.addWidget(self.add_btn)
 
-        # ----- מדידה
+        # ----- מדידה: לחיצה מפעילה מדידה מיד; החץ הקטן פותח כיול ובדיקת קנ"מ
         mm2 = self._menu(self)
-        self._act(mm2, "מדידת מרחק", lambda: self._tool_clicked("dim", True),
-                  "מקליקים נקודת התחלה ונקודת סיום. Shift = קו ישר. התוצאה בס\"מ לפי הקנ\"מ")
         self._act(mm2, "כיול לפי קו באורך ידוע", lambda: self._tool_clicked("calib", True),
                   "מסמנים קו שאורכו ידוע ומקלידים את אורכו האמיתי — הקנ\"מ יחושב")
         self._act(mm2, "בדיקת קנ\"מ מחדש מול המידות", self._reanalyze,
                   "מבטל קנ\"מ שנקבע ידנית בעמוד ובודק שוב לפי הכיתוב והמידות בשרטוט")
-        self.measure_btn = self._menu_btn("מדידה", "מדידת מרחק, כיול ובדיקת קנה המידה", mm2, checkable=True)
+        self.measure_btn = QToolButton()
+        self.measure_btn.setObjectName("tb")
+        self.measure_btn.setText("מדידה")
+        self.measure_btn.setCheckable(True)
+        self.measure_btn.setToolTip("מדידת מרחק בס\"מ: לחיצה מפעילה, לחיצה נוספת או Esc מפסיקים.\n"
+                                    "בחץ הקטן: כיול ובדיקת קנ\"מ")
+        self.measure_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        self.measure_btn.setMenu(mm2)
+        self.measure_btn.toggled.connect(lambda on: self._tool_clicked("dim", on))
         tb.addWidget(self.measure_btn)
         self.scale_box = QComboBox()
         self.scale_box.setEditable(True)
@@ -2057,30 +2075,15 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.zoom_box)
         tb.addWidget(self._btn("+", "הגדלה (Ctrl++)", lambda: self.view.set_zoom(self.view.zoom * 1.25)))
         tb.addWidget(self._btn("מלא", "הצגת העמוד כולו במסך (Ctrl+0)", self.view.fit_page))
-        # ----- סיבוב עמודים
-        rm = self._menu(self)
-        for title, scope in (("עמוד זה", "page"), ("כל הדפים", "all")):
-            if scope == "all":
-                rm.addSeparator()
-            head = QLabel(title)
-            head.setStyleSheet(f"font-weight: 700; color: {GRAPHITE}; padding: 6px 12px 2px 12px;")
-            wa = QWidgetAction(rm)
-            wa.setDefaultWidget(head)
-            wa.setEnabled(False)
-            rm.addAction(wa)
-            for text, mode in (("↻  סיבוב עם כיוון השעון", "cw"), ("↺  סיבוב נגד כיוון השעון", "ccw"),
-                               ("Aא  טקסט קריא – ישר למסך", "upright")):
-                self._act(rm, text, lambda s_=scope, m_=mode: self._rotate(s_, m_),
-                          ("כל עמוד מסובב כך שרוב הטקסט בו יהיה קריא: ישר, לא הפוך ולא על הצד. "
-                           "עמוד בלי טקסט (סריקה) לא זז. " if mode == "upright" else "") +
-                          "הסיבוב נשמר בקובץ רק ב\"שמירת שינויים\". אפשר לבטל עם Ctrl+Z")
+        # ----- סיבוב עמודים (חלון בחירה)
         rb = QToolButton()
         rb.setObjectName("tb")
+        rb.setText("סיבוב")
         rb.setIcon(self._glyph_icon("⟳"))
-        rb.setIconSize(QSize(18, 18))
-        rb.setToolTip("סיבוב עמודים: עמוד זה או כל הדפים, עם או נגד כיוון השעון, או יישור כך שהטקסט יהיה קריא")
-        rb.setPopupMode(QToolButton.InstantPopup)
-        rb.setMenu(rm)
+        rb.setIconSize(QSize(16, 16))
+        rb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        rb.setToolTip("סיבוב עמודים (Ctrl+R): העמוד הנוכחי או כל העמודים – 90°, לאורך, לרוחב, טקסט ישר או היפוך 180°")
+        rb.clicked.connect(self.rotate_dialog)
         tb.addWidget(rb)
         vm = self._menu(self)
         self._act(vm, "התאמה לרוחב", self.view.fit_width, shortcut="Ctrl+2")
@@ -2121,7 +2124,8 @@ class MainWindow(QMainWindow):
                         ("Ctrl+2", self.view.fit_width),
                         ("Ctrl+1", lambda: self.view.set_zoom(1.0)),
                         ("F11", self._toggle_full),
-                        ("F1", self.show_help)):
+                        ("F1", self.show_help),
+                        ("Ctrl+R", self.rotate_dialog)):
             QShortcut(QKeySequence(seq), self, activated=fn)
 
     # ----- תפריט הוסף
@@ -2263,6 +2267,7 @@ class MainWindow(QMainWindow):
     def _tool_clicked(self, key, on):
         v = self.view
         if not self._need_doc():
+            self._on_tool(v.tool)
             return
         if not on:
             v.set_tool("pan")
@@ -2523,23 +2528,57 @@ class MainWindow(QMainWindow):
     def show_help(self):
         HelpDialog(self, APP_NAME, f"{VARIANT}{VERSION}", BUILD_DATE).exec()
 
-    def _rotate(self, scope, mode):
+    @staticmethod
+    def _page_list(pages):
+        """3, 5-7, 10 – רשימת עמודים קצרה (מספור מ-1)."""
+        out, run = [], []
+        for p in sorted(pages):
+            if run and p == run[-1] + 1:
+                run.append(p)
+            else:
+                if run:
+                    out.append(run)
+                run = [p]
+        if run:
+            out.append(run)
+        return ", ".join(f"{r[0] + 1}" if len(r) == 1 else f"{r[0] + 1}-{r[-1] + 1}" for r in out)
+
+    def rotate_dialog(self):
         if not self._need_doc():
             return
         v = self.view
-        pages = range(len(v.sizes)) if scope == "all" else [max(0, v._cur_page)]
+        cur = max(0, v._cur_page)
+        dlg = RotateDialog(self, len(v.sizes), cur)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        scope, mode, direction = dlg.result_scope, dlg.result_action, dlg.result_dir
+        pages = list(range(len(v.sizes))) if scope == "all" else [cur]
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            n = v.rotate_pages(pages, mode)
+            n, notext = v.rotate_pages(pages, mode, direction)
         finally:
             QApplication.restoreOverrideCursor()
         if n:
             self.statusBar().showMessage(
-                ("העמוד סובב" if n == 1 else f"{n} עמודים סובבו") + " — נשמר בקובץ ב\"שמירת שינויים\", Ctrl+Z מבטל", 6000)
-        else:
-            self.statusBar().showMessage(("הטקסט בעמוד כבר קריא" if scope == "page" else
-                                          "הטקסט בכל העמודים כבר קריא") +
-                                         " (או שאין בו טקסט לזיהוי)", 4000)
+                ("העמוד סובב" if n == 1 else f"{n} עמודים סובבו") +
+                " — נשמר בקובץ ב\"שמירת שינויים\", Ctrl+Z מבטל", 6000)
+        elif not notext:
+            self.statusBar().showMessage("לא היה צורך לסובב — העמודים כבר במצב הזה", 5000)
+        if notext and mode in ("portrait", "landscape", "upright"):
+            lst = self._page_list(notext)
+            one = len(notext) == 1
+            what = (f"בעמוד {lst} אין" if one else f"בעמודים {lst} אין") + \
+                   " טקסט שהתוכנה יכולה לזהות (כנראה סריקה או תמונה), ולכן אי אפשר לדעת לאיזה כיוון " + \
+                   ("הוא צריך להיות." if one else "הם צריכים להיות.")
+            if mode == "upright":
+                done = ("העמוד הזה לא סובב." if one else "העמודים האלה לא סובבו.")
+            else:
+                done = ("העמוד הזה הועבר " if one else "העמודים האלה הועברו ") + \
+                       ("לאורך" if mode == "portrait" else "לרוחב") + " לפי הכיוון שבחרת (" + \
+                       ("עם" if direction == "cw" else "נגד") + " כיוון השעון), בלי בדיקת טקסט."
+            todo = ("מה לעשות: עוברים ל" + ("עמוד" if one else "כל עמוד כזה") + " ומסובבים ידנית – "
+                    "סיבוב (Ctrl+R) ← העמוד הנוכחי ← סיבוב 90 מעלות או היפוך 180 מעלות, עד שהשרטוט ישר.")
+            QMessageBox.information(self, APP_NAME, f"{what}\n\n{done}\n\n{todo}")
 
     def delete_pages_dialog(self):
         v = self.view
@@ -2687,12 +2726,15 @@ STYLE_A = f"""
 QMainWindow {{ background: #ffffff; }}
 QToolBar {{ background: #ffffff; border: none; border-bottom: 1px solid #d4d8de; padding: 4px 3px; spacing: 2px; }}
 QToolButton#tb {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
-                  padding: 0 8px; min-height: 30px; max-height: 30px; font-size: 10pt; }}
+                  padding: 0 6px; min-height: 30px; max-height: 30px; font-size: 10pt; }}
 QToolButton#tb::menu-indicator {{ image: none; width: 0; }}
 QToolButton#tbur {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
                     padding: 0 4px; min-height: 30px; max-height: 30px; font-size: 7.5pt; }}
 QToolButton#tbur:hover {{ background: #f2f4f7; }}
 QToolButton#tb:hover {{ background: #f2f4f7; }}
+QToolButton#tb[popupMode="1"] {{ padding-left: 18px; }}
+QToolButton#tb::menu-button {{ border: none; border-right: 1px solid #cfd4db; width: 16px; }}
+QToolButton#tb::menu-arrow {{ width: 8px; height: 8px; }}
 QToolButton#tb:checked {{ background: #fbe9eb; border-color: {ACCENT}; color: {ACCENT}; }}
 QToolButton#primary {{ color: #ffffff; background: {ACCENT}; border: 1px solid {ACCENT}; border-radius: 4px;
                        padding: 0 12px; min-height: 30px; max-height: 30px; font-size: 10pt; font-weight: 600; }}
@@ -2730,9 +2772,12 @@ QMainWindow {{ background: {CHROME}; }}
 QToolBar {{ background: {CHROME}; border: none; border-bottom: 1px solid {HAIR}; padding: 6px 4px; spacing: 2px; }}
 QToolBar::separator {{ background: {HAIR}; width: 1px; margin: 6px 6px; }}
 QToolButton#tb {{ color: {GRAPHITE}; background: transparent; border: 1px solid transparent; border-radius: 6px;
-                  padding: 0 8px; min-height: 34px; max-height: 34px; font-size: 10pt; font-weight: 500; }}
+                  padding: 0 6px; min-height: 34px; max-height: 34px; font-size: 10pt; font-weight: 500; }}
 QToolButton#tb::menu-indicator {{ image: none; width: 0; }}
 QToolButton#tb:hover {{ background: #e3e6e5; }}
+QToolButton#tb[popupMode="1"] {{ padding-left: 18px; }}
+QToolButton#tb::menu-button {{ border: none; border-right: 1px solid {HAIR}; width: 16px; }}
+QToolButton#tb::menu-arrow {{ width: 8px; height: 8px; }}
 QToolButton#tb:pressed {{ background: #d9dddc; }}
 QToolButton#tb:checked {{ background: #ffffff; border: 1px solid {HAIR}; border-bottom: 3px solid {ACCENT};
                           color: {GRAPHITE}; font-weight: 600; }}
