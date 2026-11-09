@@ -37,7 +37,6 @@ from scale_detect import analyzer_main
 from cliptray import ClipTray, TRAY_STYLE
 import marks_store
 from help import HelpDialog
-from rotate_dialog import RotateDialog
 
 APP_NAME = "טיקטין PDF A"
 TILE = 512                 # גודל אריח בפיקסלים של המסך
@@ -2023,8 +2022,25 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.page_edit)
         self.page_total = QLabel(" / – ")
         tb.addWidget(self.page_total)
-        tb.addWidget(self._btn("סיבוב", "סיבוב העמוד הנוכחי או כל העמודים — עם או נגד כיוון השעון, "
-                                          "או להעמיד הכול לאורך / לרוחב (Ctrl+R)", self.rotate_dialog))
+        rm = self._menu(self)
+        for scope, title in (("page", "העמוד הנוכחי"), ("all", "כל העמודים")):
+            sm = rm.addMenu(title)
+            for mode, cw, text, tip in (
+                    ("rot", True, "↻ 90° עם כיוון השעון", "רבע סיבוב ימינה"),
+                    ("rot", False, "↺ 90° נגד כיוון השעון", "רבע סיבוב שמאלה"),
+                    ("180", True, "היפוך 180°", "הופך עמוד שעומד הפוך"),
+                    (None, None, None, None),
+                    ("portrait", True, "לאורך", "העמוד יעמוד לאורך, והטקסט בשרטוט ישר וקריא"),
+                    ("landscape", True, "לרוחב", "העמוד יעמוד לרוחב, והטקסט בשרטוט ישר וקריא"),
+                    ("upright", True, "טקסט ישר", "מסובב כך שהטקסט בשרטוט יעמוד ישר וקריא")):
+                if mode is None:
+                    sm.addSeparator()
+                    continue
+                self._act(sm, text, lambda s_=scope, m_=mode, c_=cw: self.rotate_pages(s_, m_, c_), tip)
+        self.rotate_menu = rm
+        self.rotate_btn = self._menu_btn("סיבוב", "סיבוב העמוד הנוכחי או כל העמודים: 90°, 180°, לאורך, לרוחב "
+                                                   "או טקסט ישר (Ctrl+R)", rm)
+        tb.addWidget(self.rotate_btn)
         tb.addWidget(self._btn("−", "הקטנה (Ctrl+-)", lambda: self.view.set_zoom(self.view.zoom / 1.25)))
         self.zoom_box = QComboBox()
         self.zoom_box.setEditable(True)
@@ -2077,7 +2093,7 @@ class MainWindow(QMainWindow):
                         ("Ctrl+1", lambda: self.view.set_zoom(1.0)),
                         ("F11", self._toggle_full),
                         ("F1", self.show_help),
-                        ("Ctrl+R", self.rotate_dialog)):
+                        ("Ctrl+R", lambda: self.rotate_btn.showMenu())):
             QShortcut(QKeySequence(seq), self, activated=fn)
 
     # ----- תפריט הוסף
@@ -2532,15 +2548,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"נשמר: {os.path.basename(target)}", 6000)
         return True
 
-    def rotate_dialog(self):
+    def rotate_pages(self, scope, mode, cw=True):
         v = self.view
         if not self._need_doc():
             return
         n = len(v.sizes)
         cur = max(0, v._cur_page)
-        dlg = RotateDialog(self, n, cur + 1)
-        if dlg.exec() != QDialog.Accepted:
-            return
+
+        class dlg:  # noqa: N801
+            pass
+        dlg.scope, dlg.mode, dlg.cw = scope, mode, cw
         pages = range(n) if dlg.scope == "all" else [cur]
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -2562,9 +2579,9 @@ class MainWindow(QMainWindow):
                    "אין בעמודים האלה טקסט שהמחשב יכול לקרוא (כנראה סריקה או שרטוט בלי טקסט)")
             if dlg.mode == "upright":
                 todo = ("העמודים האלה לא סובבו.\n"
-                        "כדי ליישר אותם: סיבוב ← סיבוב 90° (עם או נגד כיוון השעון) או היפוך 180°.")
+                        "כדי ליישר אותם: סיבוב ← 90° עם או נגד כיוון השעון, או היפוך 180°.")
             else:
-                todo = ("העמודים האלה סובבו רק לפי הכיוון שבחרת, ולא נבדק שהטקסט לא הפוך.\n"
+                todo = ("העמודים האלה סובבו עם כיוון השעון, ולא נבדק שהטקסט לא הפוך.\n"
                         "אם עמוד יצא הפוך: סיבוב ← היפוך 180°.")
             QMessageBox.information(
                 self, APP_NAME,
