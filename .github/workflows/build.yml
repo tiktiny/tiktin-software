@@ -22,4 +22,4 @@ jobs:
         run: |
           VER=$(sed -n 1p VERSION)
           gh release delete "v$VER" -y --cleanup-tag || true
-          gh release create "v$VER" out/TiktinPDF-Setup.exe --title "Tiktin PDF $VER" --notes "Tiktin PDF $VER" --latest
+          gh release create "v$VER" out/TiktinPDF-Setup.exe out/TiktinPDF-B-Setup.exe --title "Tiktin PDF $VER" --notes "Tiktin PDF $VER" --latest
