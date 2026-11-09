@@ -5,6 +5,7 @@ import datetime
 import pymupdf
 from PySide6.QtCore import Qt, QSettings, QRectF, QMarginsF, QTimer, QEventLoop, QPointF
 from PySide6.QtGui import QImage, QPainter, QPageSize, QPageLayout, QFont, QColor, QPen, QPixmap
+from ui_variant import NEW_UI
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                                QButtonGroup, QComboBox, QSpinBox, QProgressDialog, QMessageBox,
                                QApplication, QWidget, QSizePolicy)
@@ -185,7 +186,8 @@ class PrintDialog(QDialog):
         self.pv.setAlignment(Qt.AlignCenter)
         self.pv.setMinimumSize(300, 300)
         self.pv.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.pv.setStyleSheet("background:#b9bfc0; border:none; color:#24282b;")
+        self.pv.setStyleSheet("background:#b9bfc0; border:none; color:#24282b;" if NEW_UI else
+                              "background:#d9dde3; border:none; color:#5a6270;")
         lay.addWidget(self.pv, 1)
         nav = QHBoxLayout()
         self.prev_b = QPushButton("הקודם")

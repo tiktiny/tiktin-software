@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QAbstractScrollArea,
 
 from render_worker import worker_main
 from version import VERSION, BUILD_DATE, LOGO_B64
+from ui_variant import NEW_UI, VARIANT
 try:
     from version import ICON_B64
 except ImportError:
@@ -37,21 +38,31 @@ from scale_detect import analyzer_main
 from cliptray import ClipTray, TRAY_STYLE
 import marks_store
 
-APP_NAME = "טיקטין PDF"
+APP_NAME = "טיקטין PDF ממשק חדש" if NEW_UI else "טיקטין PDF"
 TILE = 512                 # גודל אריח בפיקסלים של המסך
 MARGIN = 16                # שוליים סביב העמודים
 GAP = 12                   # רווח בין עמודים
 CACHE_BYTES = 700 * 2**20  # תקרת זיכרון לאריחים מוכנים
 MIN_ZOOM, MAX_ZOOM = 0.02, 64.0
-CANVAS_BG = QColor("#b9bfc0")   # שולחן אור סביב הדף
-ACCENT = "#c41c2d"              # אדום טיקטין: רק סימונים והכלי הפעיל
-GRAPHITE = "#24282b"            # טקסט, אייקונים
-STEEL = "#5c6367"               # טקסט משני
-CHROME = "#eef0ef"              # נייר שקיפה: מסגרת התוכנה
-HAIR = "#cdd2d1"                # קווים דקים
-SUGGEST = "#f68223"             # כתום: הצעות של התוכנה
-SUGGEST_TXT = "#9a4306"
-SUGGEST_BG = "#fff4ea"
+if NEW_UI:   # ממשק B – "קו אדום"
+    CANVAS_BG = QColor("#b9bfc0")   # שולחן אור סביב הדף
+    ACCENT = "#c41c2d"              # אדום טיקטין: רק סימונים והכלי הפעיל
+    GRAPHITE = "#24282b"
+    STEEL = "#5c6367"
+    CHROME = "#eef0ef"
+    HAIR = "#cdd2d1"
+    SUGGEST = "#f68223"             # כתום: הצעות של התוכנה
+    SUGGEST_TXT = "#9a4306"
+    SUGGEST_BG = "#fff4ea"
+    SCALE_COL = {"manual": GRAPHITE, "busy": STEEL, "mismatch": SUGGEST_TXT, "ok": GRAPHITE,
+                 "text": SUGGEST_TXT, "none": SUGGEST_TXT}
+else:        # ממשק A – הממשק הקיים
+    CANVAS_BG = QColor("#d9dde3")
+    ACCENT = "#c8202f"
+    GRAPHITE = "#1f2630"
+    STEEL = "#5a6270"
+    SCALE_COL = {"manual": "#1f2630", "busy": "#7a828e", "mismatch": "#c8202f", "ok": "#1a7f37",
+                 "text": "#9a6700", "none": "#9a6700"}
 
 
 # ---------------------------------------------------------------- rendering pool
@@ -649,7 +660,10 @@ class PdfView(QAbstractScrollArea):
         exact = abs(self.tscale - cur_s) < 1e-6
         for i in self.visible_pages():
             r = self.page_rect(i)
-            p.fillRect(r.adjusted(-1, -1, 1, 1), QColor("#9aa0a2"))
+            if NEW_UI:
+                p.fillRect(r.adjusted(-1, -1, 1, 1), QColor("#9aa0a2"))
+            else:
+                p.fillRect(r.adjusted(1, 1, 3, 3), QColor(0, 0, 0, 40))
             p.fillRect(r, Qt.white)
             needed = [(self.docgen, i, sk, tx, ty) for tx, ty in self._needed_tiles(i, self.tscale)]
             complete = exact and needed and all(k in self.tiles for k in needed)
@@ -688,9 +702,9 @@ class PdfView(QAbstractScrollArea):
         if self._sel:
             a, b = self._sel
             sr = QRectF(a, b).normalized()
-            p.fillRect(sr, QColor(36, 40, 43, 22))
+            p.fillRect(sr, QColor(36, 40, 43, 22) if NEW_UI else QColor(200, 32, 47, 28))
             pen = p.pen()
-            pen.setColor(QColor(GRAPHITE))
+            pen.setColor(QColor(GRAPHITE if NEW_UI else ACCENT))
             pen.setStyle(Qt.DashLine)
             pen.setWidthF(1.5)
             p.setPen(pen)
@@ -702,17 +716,23 @@ class PdfView(QAbstractScrollArea):
             f.setPointSizeF(9.5)
             p.setFont(f)
             fm = p.fontMetrics()
-            w = fm.horizontalAdvance(b[0]) + 22
-            rr = QRectF(self.viewport().width() - w - 10, 10, w, fm.height() + 10)
-            if b[1] == SUGGEST_TXT:
-                p.setPen(QPen(QColor(SUGGEST), 1.2))
-                p.setBrush(QColor(SUGGEST_BG))
-            elif "✓" in b[0] or b[1] == GRAPHITE:
-                p.setPen(QPen(QColor(GRAPHITE), 1.2))
-                p.setBrush(QColor("#ffffff"))
+            if NEW_UI:
+                w = fm.horizontalAdvance(b[0]) + 22
+                rr = QRectF(self.viewport().width() - w - 10, 10, w, fm.height() + 10)
+                if b[1] == SUGGEST_TXT:
+                    p.setPen(QPen(QColor(SUGGEST), 1.2))
+                    p.setBrush(QColor(SUGGEST_BG))
+                elif "✓" in b[0] or b[1] == GRAPHITE:
+                    p.setPen(QPen(QColor(GRAPHITE), 1.2))
+                    p.setBrush(QColor("#ffffff"))
+                else:
+                    p.setPen(QColor(HAIR))
+                    p.setBrush(QColor("#ffffff"))
             else:
-                p.setPen(QColor(HAIR))
-                p.setBrush(QColor("#ffffff"))
+                w = fm.horizontalAdvance(b[0]) + 18
+                rr = QRectF(self.viewport().width() - w - 10, 8, w, fm.height() + 8)
+                p.setPen(QColor("#cfd4db"))
+                p.setBrush(QColor(255, 255, 255, 235))
             p.drawRoundedRect(rr, 4, 4)
             p.setPen(QColor(b[1]))
             p.drawText(rr, Qt.AlignCenter, b[0])
@@ -842,20 +862,20 @@ class PdfView(QAbstractScrollArea):
         if i < 0 or not self.sizes:
             return None
         if i in self.scales:
-            return f"קנ\"מ 1:{self.scales[i]:.4g}  (נקבע ידנית)", GRAPHITE
+            return f"קנ\"מ 1:{self.scales[i]:.4g}  (נקבע ידנית)", SCALE_COL["manual"]
         r = self.scale_info.get(i)
         if not r or r.get("quick"):
             if i in self._asked:
-                return "בודק קנ\"מ...", STEEL
+                return "בודק קנ\"מ...", SCALE_COL["busy"]
             return None
         d, t = r.get("dims"), r.get("text")
         if d and t and d != t:
-            return f"קנ\"מ 1:{d} ✓ לפי המידות (בכיתוב 1:{t})", SUGGEST_TXT
+            return f"קנ\"מ 1:{d} ✓ לפי המידות (בכיתוב 1:{t})", SCALE_COL["mismatch"]
         if d:
-            return f"קנ\"מ 1:{d} ✓ אומת מול המידות", GRAPHITE
+            return f"קנ\"מ 1:{d} ✓ אומת מול המידות", SCALE_COL["ok"]
         if t:
-            return f"קנ\"מ 1:{t} לפי הכיתוב — לא אומת", SUGGEST_TXT
-        return "קנ\"מ לא זוהה — מומלץ לכייל", SUGGEST_TXT
+            return f"קנ\"מ 1:{t} לפי הכיתוב — לא אומת", SCALE_COL["text"]
+        return "קנ\"מ לא זוהה — מומלץ לכייל", SCALE_COL["none"]
 
     def set_scale(self, i, S):
         self.scales[i] = S
@@ -1918,9 +1938,9 @@ class MainWindow(QMainWindow):
         self.wheel_act.toggled.connect(self._wheel_mode)
         self._act(vm, "מסך מלא", self._toggle_full, shortcut="F11")
         tb.addWidget(self._menu_btn("תצוגה", "התאמה לרוחב, 100%, מצב גלגלת ומסך מלא", vm))
-        ver = QLabel(f" גרסה {VERSION} | {BUILD_DATE} ")
+        ver = QLabel(f" גרסה {VARIANT}{VERSION} | {BUILD_DATE} ")
         ver.setObjectName("ver")
-        ver.setToolTip(f"גרסה {VERSION}, עודכנה {BUILD_DATE}")
+        ver.setToolTip(f"גרסה {VARIANT}{VERSION} ({'ממשק חדש' if NEW_UI else 'ממשק קיים'}), עודכנה {BUILD_DATE}")
         self.statusBar().addPermanentWidget(ver)
 
         self.tool_btns = {}
@@ -2484,7 +2504,48 @@ class MainWindow(QMainWindow):
         super().closeEvent(ev)
 
 
-STYLE = f"""
+STYLE_A = f"""
+QMainWindow {{ background: #ffffff; }}
+QToolBar {{ background: #ffffff; border: none; border-bottom: 1px solid #d4d8de; padding: 4px 4px; spacing: 4px; }}
+QToolButton#tb {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
+                  padding: 0 8px; min-height: 30px; max-height: 30px; font-size: 10pt; }}
+QToolButton#tb::menu-indicator {{ image: none; width: 0; }}
+QToolButton#tbur {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
+                    padding: 0 4px; min-height: 30px; max-height: 30px; font-size: 7.5pt; }}
+QToolButton#tbur:hover {{ background: #f2f4f7; }}
+QToolButton#tb:hover {{ background: #f2f4f7; }}
+QToolButton#tb:checked {{ background: #fbe9eb; border-color: {ACCENT}; color: {ACCENT}; }}
+QToolButton#primary {{ color: #ffffff; background: {ACCENT}; border: 1px solid {ACCENT}; border-radius: 4px;
+                       padding: 0 12px; min-height: 30px; max-height: 30px; font-size: 10pt; font-weight: 600; }}
+QToolButton#primary:hover {{ background: #a91a27; }}
+QLineEdit, QComboBox {{ background: #ffffff; color: #1f2630; border: 1px solid #cfd4db; border-radius: 4px;
+                        min-height: 30px; max-height: 30px; font-size: 10pt; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox QAbstractItemView {{ background: #ffffff; color: #1f2630; }}
+QLabel {{ color: #1f2630; font-size: 10pt; }}
+QDialog {{ background: #ffffff; }}
+QPushButton#seg {{ background: #ffffff; color: #1f2630; border: 1px solid #cfd4db; border-radius: 0;
+                   min-height: 32px; max-height: 32px; padding: 0 14px; font-size: 10pt; margin-left: -1px; }}
+QPushButton#seg:checked {{ background: {ACCENT}; color: #ffffff; border-color: {ACCENT}; }}
+QPushButton#seg:hover:!checked {{ background: #f2f4f7; }}
+QPushButton#primaryBtn {{ background: {ACCENT}; color: #ffffff; border: 1px solid {ACCENT}; border-radius: 4px;
+                          min-height: 32px; padding: 0 22px; font-size: 10pt; font-weight: 600; }}
+QPushButton#plainBtn {{ background: #ffffff; color: #1f2630; border: 1px solid #cfd4db; border-radius: 4px;
+                        min-height: 32px; padding: 0 22px; font-size: 10pt; }}
+QSpinBox {{ background: #ffffff; color: #1f2630; border: 1px solid #cfd4db; border-radius: 4px;
+            min-height: 30px; max-height: 30px; font-size: 10pt; }}
+QStatusBar {{ background: #ffffff; color: {ACCENT}; font-size: 10pt; }}
+QProgressDialog {{ background: #ffffff; }}
+QLabel#ver {{ color: #7a828e; font-size: 9pt; }}
+QToolTip {{ background: #ffffff; color: #1f2630; border: 1px solid #cfd4db; }}
+QScrollBar:vertical {{ background: {CANVAS_BG.name()}; width: 12px; }}
+QScrollBar:horizontal {{ background: {CANVAS_BG.name()}; height: 12px; }}
+QScrollBar::handle {{ background: #a9b0ba; border-radius: 5px; min-height: 30px; min-width: 30px; margin: 2px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+"""
+
+if NEW_UI:
+    STYLE = f"""
 * {{ font-family: "IBM Plex Sans Hebrew", "Segoe UI"; }}
 QMainWindow {{ background: {CHROME}; }}
 QToolBar {{ background: {CHROME}; border: none; border-bottom: 1px solid {HAIR}; padding: 6px 4px; spacing: 2px; }}
@@ -2542,16 +2603,28 @@ QScrollBar::handle:hover {{ background: #6f7679; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
 """
+else:
+    STYLE = STYLE_A
+
 
 
 def light_palette():
     pal = QPalette()
-    for role, c in ((QPalette.Window, CHROME), (QPalette.WindowText, GRAPHITE),
+    if NEW_UI:
+        for role, c in ((QPalette.Window, CHROME), (QPalette.WindowText, GRAPHITE),
+                        (QPalette.Base, "#ffffff"), (QPalette.AlternateBase, "#f4f6f8"),
+                        (QPalette.Text, GRAPHITE), (QPalette.Button, "#ffffff"),
+                        (QPalette.ButtonText, GRAPHITE), (QPalette.Highlight, GRAPHITE),
+                        (QPalette.HighlightedText, "#ffffff"), (QPalette.ToolTipBase, "#ffffff"),
+                        (QPalette.ToolTipText, GRAPHITE)):
+            pal.setColor(role, QColor(c))
+        return pal
+    for role, c in ((QPalette.Window, "#ffffff"), (QPalette.WindowText, "#1f2630"),
                     (QPalette.Base, "#ffffff"), (QPalette.AlternateBase, "#f4f6f8"),
-                    (QPalette.Text, GRAPHITE), (QPalette.Button, "#ffffff"),
-                    (QPalette.ButtonText, GRAPHITE), (QPalette.Highlight, GRAPHITE),
+                    (QPalette.Text, "#1f2630"), (QPalette.Button, "#ffffff"),
+                    (QPalette.ButtonText, "#1f2630"), (QPalette.Highlight, ACCENT),
                     (QPalette.HighlightedText, "#ffffff"), (QPalette.ToolTipBase, "#ffffff"),
-                    (QPalette.ToolTipText, GRAPHITE)):
+                    (QPalette.ToolTipText, "#1f2630")):
         pal.setColor(role, QColor(c))
     return pal
 
@@ -2572,7 +2645,7 @@ def _clean_temp():
 
 
 def _load_fonts(app):
-    """IBM Plex Sans Hebrew מותקן יחד עם התוכנה. אם לא נמצא, נשאר הגופן של Windows."""
+    """ממשק B: IBM Plex Sans Hebrew מותקן יחד עם התוכנה. אם לא נמצא, נשאר הגופן של Windows."""
     from PySide6.QtGui import QFontDatabase
     d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
     ok = False
@@ -2590,14 +2663,15 @@ def main():
     if sys.platform == "win32":
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Tiktin.PDF")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Tiktin.PDF.B" if NEW_UI else "Tiktin.PDF")
         except Exception:
             pass
     pymupdf.TOOLS.set_graphics_min_line_width(1.0)   # קווים דקים כהים וברורים (גם בהדפסה)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
-    _load_fonts(app)
+    if NEW_UI:
+        _load_fonts(app)
     app.setPalette(light_palette())
     app.setLayoutDirection(Qt.RightToLeft)
     app.setStyleSheet(STYLE + TRAY_STYLE)

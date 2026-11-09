@@ -3,11 +3,12 @@
 import math
 from PySide6.QtCore import Qt, QPointF, QRectF
 from PySide6.QtGui import QPen, QColor, QFont, QPainterPath, QPolygonF, QBrush
+from ui_variant import NEW_UI
 
 PT_PER_MM = 72.0 / 25.4
 HOLE_COLOR = "#d0021b"
 DIM_COLOR = "#0057b8"
-SEL_COLOR = "#24282b"
+SEL_COLOR = "#24282b" if NEW_UI else "#ff8a00"
 LABEL_PT = 7.0            # גובה טקסט על הנייר (כ-2.5 מ"מ)
 PRINT_LINE_PT = 0.8       # עובי קו בהדפסה ובשמירה
 KIND_NAME = {"floor": "חור ברצפה", "ceil": "חור בתקרה", "wall": "חור בקיר"}
