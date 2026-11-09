@@ -1,7 +1,7 @@
 # כפתור צבע עם תפריט צבעים קבוע (עברית, בלי חלון צבעים באנגלית)
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QColor, QIcon, QPainter
-from PySide6.QtWidgets import QToolButton, QMenu
+from PySide6.QtWidgets import QToolButton
 
 PALETTE = [("#d0021b", "אדום"), ("#000000", "שחור")]
 

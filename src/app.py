@@ -1,7 +1,6 @@
 import os
 import sys
 import math
-import bisect
 import base64
 import multiprocessing as mp
 from multiprocessing.connection import wait
@@ -9,14 +8,13 @@ from collections import OrderedDict
 
 import pymupdf
 from PySide6.QtCore import (Qt, QTimer, QThread, Signal, QObject, QRectF,
-                            QPointF, QSettings, QSize, QMimeData, QEvent)
+                            QPointF, QSettings, QSize, QEvent)
 from PySide6.QtGui import (QPainter, QImage, QPixmap, QColor, QIcon, QKeySequence, QTextCursor,
                            QShortcut, QPalette, QCursor, QFont)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QAbstractScrollArea,
                                QToolBar, QToolButton, QLabel, QLineEdit, QComboBox,
                                QFileDialog, QMessageBox, QInputDialog, QWidget,
-                               QSizePolicy, QHBoxLayout, QDialog, QMenu, QProgressDialog,
-                               QWidgetAction)
+                               QSizePolicy, QDialog, QMenu, QProgressDialog)
 
 from render_worker import worker_main
 from version import VERSION, BUILD_DATE, LOGO_B64
@@ -1082,6 +1080,7 @@ class PdfView(QAbstractScrollArea):
         d0 = 90 if cw else -90
         plan = {}
         self.rotate_unknown = []          # עמודים שבהם אי אפשר לזהות את כיוון הטקסט (למשל סריקה)
+        self.rotate_sideways = []         # עמודים שבמצב שנבחר הטקסט יוצא אנכי
         for i in pages:
             W, H = self.sizes[i]
             if mode == "rot":
@@ -1105,6 +1104,7 @@ class PdfView(QAbstractScrollArea):
                         else:
                             # אי אפשר גם וגם: עומדים במצב שנבחר, והטקסט נקרא מלמטה למעלה (כמו מידות בשרטוט)
                             r = (t - 90) % 360
+                            self.rotate_sideways.append(i)
                 if r:
                     plan[i] = {90: 90, 180: 180, 270: -90}[r % 360]
         if not plan:
@@ -2245,10 +2245,16 @@ class MainWindow(QMainWindow):
                       (getattr(self, "print_btn", None), v.select_mode and v.select_purpose == "print"),
                       (getattr(self, "add_btn", None), v.tool in self.ADD_TOOLS),
                       (getattr(self, "measure_btn", None), v.tool in ("dim", "calib"))):
-            if b is not None and b.isChecked() != bool(on):
+            if b is None:
+                continue
+            if b.isChecked() != bool(on):
                 b.blockSignals(True)
                 b.setChecked(bool(on))
                 b.blockSignals(False)
+            if b.property("active") != bool(on):
+                # סגנון ישיר על הכפתור: אדום בוודאות, גם כשהעכבר מעליו או כשהוא בפוקוס
+                b.setProperty("active", bool(on))
+                b.setStyleSheet(ACTIVE_BTN_CSS if on else "")
 
     def show_help(self):
         if getattr(self, "_help", None) is not None:
@@ -2417,7 +2423,6 @@ class MainWindow(QMainWindow):
         img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
         one.close()
         out.close()
-        n = len(self.tray.items) + 1
         return {"pdf": path, "img": img, "name": name,
                 "label": f"✓ נקלט · עמוד {i + 1}"}
 
@@ -2572,6 +2577,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("כל העמודים כבר במצב שנבחר — לא היה מה לסובב", 6000)
         elif k:
             self.statusBar().showMessage(f"סובבו {k} עמודים. UNDO מחזיר; הקובץ עצמו משתנה רק ב\"שמירת שינויים\"", 8000)
+        side = getattr(v, "rotate_sideways", []) if dlg.mode in ("portrait", "landscape") else []
+        if side:
+            QMessageBox.information(
+                self, APP_NAME,
+                f"בעמודים {self._page_ranges(side)} אי אפשר להעמיד את הדף "
+                f"{'לאורך' if dlg.mode == 'portrait' else 'לרוחב'} וגם את הטקסט ישר:\n"
+                "הטקסט בשרטוט כתוב לאורך הצד הארוך של הדף.\n\n"
+                "הדפים הועמדו כפי שביקשת, והטקסט בהם אנכי — נקרא מלמטה למעלה, לא הפוך.\n"
+                "לטקסט ישר: סיבוב ← טקסט ישר.")
         if unknown:
             pages_txt = self._page_ranges(unknown)
             allp = len(unknown) == n if dlg.scope == "all" else True
@@ -2800,6 +2814,10 @@ def light_palette():
                     (QPalette.ToolTipText, "#1f2630")):
         pal.setColor(role, QColor(c))
     return pal
+
+
+ACTIVE_BTN_CSS = ("QToolButton, QToolButton:hover, QToolButton:pressed, QToolButton:checked, QToolButton:focus "
+                  "{ background: #c8202f; border: 1px solid #c8202f; color: #ffffff; font-weight: 600; }")
 
 
 def _clean_temp():

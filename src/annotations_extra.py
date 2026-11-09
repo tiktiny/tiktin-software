@@ -87,6 +87,26 @@ def cloud_arcs(it):
     return out
 
 
+_CLOUD_CACHE = {}
+
+
+def _cloud_path(it):
+    """מסלול הענן נשמר בזיכרון לפי המידות — חישוב מחדש בכל ציור מאט גלילה."""
+    key = (tuple(it["p1"]), tuple(it["p2"]), it.get("w", 0.5))
+    path = _CLOUD_CACHE.get(key)
+    if path is None:
+        arcs = cloud_arcs(it)
+        path = QPainterPath()
+        if arcs:
+            path.moveTo(QPointF(*arcs[0][0]))
+            for a, c, b in arcs:
+                path.quadTo(QPointF(*c), QPointF(*b))
+        if len(_CLOUD_CACHE) > 500:
+            _CLOUD_CACHE.clear()
+        _CLOUD_CACHE[key] = path
+    return path
+
+
 def shape_bbox(it):
     pad = _wpt(it) / 2
     r = shape_box(it)
@@ -146,12 +166,7 @@ def paint_shape(p, it, cosmetic):
     elif k == "ellipse":
         p.drawEllipse(r)
     elif k == "cloud":
-        arcs = cloud_arcs(it)
-        if arcs:
-            path = QPainterPath(QPointF(*arcs[0][0]))
-            for a, c, b in arcs:
-                path.quadTo(QPointF(*c), QPointF(*b))
-            p.drawPath(path)
+        p.drawPath(_cloud_path(it))
 
 
 def bake_shape(page, it, m):
