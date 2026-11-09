@@ -1049,6 +1049,76 @@ class PdfView(QAbstractScrollArea):
         self.viewport().update()
         return True
 
+    @staticmethod
+    def _rot_item(it, d, W, H):
+        """מסובב סימון יחד עם העמוד (d=90 עם כיוון השעון, -90 נגד). W,H = מידות העמוד לפני הסיבוב."""
+        def f(q):
+            x, y = q[0], q[1]
+            return (H - y, x) if d == 90 else (y, W - x)
+        r = dict(it)
+        for k in ("c", "p", "p1", "p2"):
+            if r.get(k) is not None:
+                r[k] = f(r[k])
+        if r.get("pts"):
+            r["pts"] = [f(q) for q in r["pts"]]
+        # סימונים בגודל קבוע סביב מרכז מקבלים עוד 90° בזווית; סימונים שמוגדרים בנקודות מסתובבים עם הנקודות
+        if r.get("type") in ("trafo", "mark", "stamp", "hole"):
+            a = (r.get("angle", 0.0) + d) % 360
+            r["angle"] = 0.0 if abs(a) < 1e-6 else a
+        return r
+
+    def rotate_pages(self, pages, mode):
+        """mode: cw / ccw / portrait / landscape. מחזיר כמה עמודים סובבו.
+        הקובץ המקורי לא משתנה עד "שמירת שינויים"."""
+        import tempfile
+        import uuid
+        todo = {}
+        for i in sorted(set(p for p in pages if 0 <= p < len(self.sizes))):
+            w, h = self.sizes[i]
+            if mode == "cw":
+                todo[i] = 90
+            elif mode == "ccw":
+                todo[i] = -90
+            elif mode == "portrait" and w > h + 0.5:
+                todo[i] = 90
+            elif mode == "landscape" and h > w + 0.5:
+                todo[i] = 90
+        if not todo:
+            return 0
+        if self.editor:
+            self.finish_text_edit()
+        st = self._page_state()
+        doc2 = pymupdf.open(self.src)
+        if doc2.needs_pass:
+            doc2.authenticate(self.pw or "")
+        for i, d in todo.items():
+            pg = doc2[i]
+            pg.set_rotation((pg.rotation + d) % 360)
+        d_ = os.path.join(tempfile.gettempdir(), "TiktinPDF-work")
+        os.makedirs(d_, exist_ok=True)
+        tmp = os.path.join(d_, uuid.uuid4().hex + ".pdf")
+        doc2.save(tmp, garbage=1)
+        doc2.close()
+        items = {}
+        for i, v in self.items.items():
+            if i in todo:
+                W, H = self.sizes[i]
+                items[i] = [self._rot_item(it, todo[i], W, H) for it in v]
+            else:
+                items[i] = [dict(it) for it in v]
+        scales, auto = dict(self.scales), dict(self.auto_scales)
+        cur = self._reload_src(tmp, None)
+        self.undo.append(st)
+        del self.undo[:-50]
+        self.redo = []
+        self.items, self.scales, self.auto_scales = items, scales, auto
+        self.pages_changed = True
+        self.dirty = True
+        self.changed.emit()
+        self.go_page(min(cur, len(self.sizes) - 1))
+        self.viewport().update()
+        return len(todo)
+
     def delete_selected(self):
         if self.selected:
             i, idx = self.selected
@@ -1927,6 +1997,31 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.zoom_box)
         tb.addWidget(self._btn("+", "הגדלה (Ctrl++)", lambda: self.view.set_zoom(self.view.zoom * 1.25)))
         tb.addWidget(self._btn("מלא", "הצגת העמוד כולו במסך (Ctrl+0)", self.view.fit_page))
+        # ----- סיבוב עמודים
+        rm = self._menu(self)
+        for title, scope in (("עמוד זה", "page"), ("כל הדפים", "all")):
+            if scope == "all":
+                rm.addSeparator()
+            head = QLabel(title)
+            head.setStyleSheet(f"font-weight: 700; color: {GRAPHITE}; padding: 6px 12px 2px 12px;")
+            wa = QWidgetAction(rm)
+            wa.setDefaultWidget(head)
+            wa.setEnabled(False)
+            rm.addAction(wa)
+            for text, mode in (("↻  סיבוב עם כיוון השעון", "cw"), ("↺  סיבוב נגד כיוון השעון", "ccw"),
+                               ("▯  הכול לאורך", "portrait"), ("▭  הכול לרוחב", "landscape")):
+                if scope == "page" and mode in ("portrait", "landscape"):
+                    text = "▯  לאורך" if mode == "portrait" else "▭  לרוחב"
+                self._act(rm, text, lambda s_=scope, m_=mode: self._rotate(s_, m_),
+                          "הסיבוב נשמר בקובץ רק ב\"שמירת שינויים\". אפשר לבטל עם Ctrl+Z")
+        rb = QToolButton()
+        rb.setObjectName("tb")
+        rb.setIcon(self._glyph_icon("⟳"))
+        rb.setIconSize(QSize(18, 18))
+        rb.setToolTip("סיבוב עמודים: עמוד זה או כל הדפים, עם או נגד כיוון השעון, או לאורך / לרוחב")
+        rb.setPopupMode(QToolButton.InstantPopup)
+        rb.setMenu(rm)
+        tb.addWidget(rb)
         vm = self._menu(self)
         self._act(vm, "התאמה לרוחב", self.view.fit_width, shortcut="Ctrl+2")
         self._act(vm, "עמוד מלא", self.view.fit_page, shortcut="Ctrl+0")
@@ -2362,6 +2457,19 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"נשמר: {os.path.basename(target)}", 6000)
         return True
 
+    def _rotate(self, scope, mode):
+        if not self._need_doc():
+            return
+        v = self.view
+        pages = range(len(v.sizes)) if scope == "all" else [max(0, v._cur_page)]
+        n = v.rotate_pages(pages, mode)
+        if n:
+            self.statusBar().showMessage(
+                ("העמוד סובב" if n == 1 else f"{n} עמודים סובבו") + " — נשמר בקובץ ב\"שמירת שינויים\", Ctrl+Z מבטל", 6000)
+        else:
+            self.statusBar().showMessage(("העמוד כבר" if scope == "page" else "כל העמודים כבר") +
+                                         (" לאורך" if mode == "portrait" else " לרוחב"), 4000)
+
     def delete_pages_dialog(self):
         v = self.view
         if not self._need_doc():
@@ -2506,7 +2614,7 @@ class MainWindow(QMainWindow):
 
 STYLE_A = f"""
 QMainWindow {{ background: #ffffff; }}
-QToolBar {{ background: #ffffff; border: none; border-bottom: 1px solid #d4d8de; padding: 4px 4px; spacing: 4px; }}
+QToolBar {{ background: #ffffff; border: none; border-bottom: 1px solid #d4d8de; padding: 4px 3px; spacing: 2px; }}
 QToolButton#tb {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
                   padding: 0 8px; min-height: 30px; max-height: 30px; font-size: 10pt; }}
 QToolButton#tb::menu-indicator {{ image: none; width: 0; }}
