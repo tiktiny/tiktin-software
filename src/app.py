@@ -1067,6 +1067,55 @@ class PdfView(QAbstractScrollArea):
             r["angle"] = 0.0 if abs(a) < 1e-6 else a
         return r
 
+    def _text_weights(self, i):
+        """כמות הטקסט בכל כיוון (0/90/180/270 מעלות) לפי העמוד הלא מסובב."""
+        wts = {0: 0.0, 90: 0.0, 180: 0.0, 270: 0.0}
+        try:
+            d = self.doc[i].get_text("dict", flags=0)
+        except Exception:
+            return wts
+        for b in d.get("blocks", []):
+            for ln in b.get("lines", []):
+                n = sum(len(sp.get("text", "").strip()) for sp in ln.get("spans", []))
+                if n:
+                    dx, dy = ln.get("dir", (1.0, 0.0))
+                    a = int(round(math.degrees(math.atan2(dy, dx)) / 90.0)) * 90 % 360
+                    wts[a] += n
+        return wts
+
+    def _upright_delta(self, i):
+        """כמה לסובב את עמוד i כדי שהטקסט בו יהיה קריא: ישר למסך, לא הפוך ולא על הצד."""
+        wts = self._text_weights(i)
+        if not any(wts.values()):
+            return 0          # אין טקסט (סריקה) – לא נוגעים
+        cur = self.doc[i].rotation % 360
+
+        def score(R):
+            t = sum(w * math.cos(math.radians(a + R)) for a, w in wts.items())
+            dist = min((R - cur) % 360, (cur - R) % 360)
+            return (round(t, 3), -dist)
+        best = max((0, 90, 180, 270), key=score)
+        return (best - cur) % 360
+
+    def _orient_delta(self, i, landscape):
+        """כמה לסובב את עמוד i כדי שיהיה לרוחב/לאורך והטקסט בו לא יהיה הפוך."""
+        pg = self.doc[i]
+        cur = pg.rotation % 360
+        r0 = pg.cropbox   # מידות העמוד בלי סיבוב
+        wide0 = r0.width > r0.height + 0.5
+        cands = [R for R in (0, 90, 180, 270) if (wide0 if R in (0, 180) else not wide0) == landscape]
+        wts = self._text_weights(i)
+
+        def score(R):
+            # טקסט ישר = +1, אנכי = 0, הפוך = -1
+            t = sum(w * math.cos(math.radians(a + R)) for a, w in wts.items())
+            # כשאין ברירה וטקסט יוצא אנכי: עדיף שיקרא מלמטה למעלה (כמו בשרטוטים, קריא מצד ימין)
+            up = sum(w * -math.sin(math.radians(a + R)) for a, w in wts.items())
+            dist = min((R - cur) % 360, (cur - R) % 360)
+            return (round(t, 3), round(up, 3), -dist, (R - cur) % 360 == 90)
+        best = max(cands, key=score)
+        return (best - cur) % 360
+
     def rotate_pages(self, pages, mode):
         """mode: cw / ccw / portrait / landscape. מחזיר כמה עמודים סובבו.
         הקובץ המקורי לא משתנה עד "שמירת שינויים"."""
@@ -1079,10 +1128,14 @@ class PdfView(QAbstractScrollArea):
                 todo[i] = 90
             elif mode == "ccw":
                 todo[i] = -90
-            elif mode == "portrait" and w > h + 0.5:
-                todo[i] = 90
-            elif mode == "landscape" and h > w + 0.5:
-                todo[i] = 90
+            elif mode == "upright":
+                dlt = self._upright_delta(i)
+                if dlt:
+                    todo[i] = dlt
+            elif mode in ("portrait", "landscape"):
+                dlt = self._orient_delta(i, mode == "landscape")
+                if dlt:
+                    todo[i] = dlt
         if not todo:
             return 0
         if self.editor:
@@ -1103,7 +1156,13 @@ class PdfView(QAbstractScrollArea):
         for i, v in self.items.items():
             if i in todo:
                 W, H = self.sizes[i]
-                items[i] = [self._rot_item(it, todo[i], W, H) for it in v]
+                v2 = [dict(it) for it in v]
+                # 180 = פעמיים 90, 270 = פעם אחת נגד כיוון השעון
+                steps = {90: [90], -90: [-90], 180: [90, 90], 270: [-90]}[todo[i]]
+                for st_ in steps:
+                    v2 = [self._rot_item(it, st_, W, H) for it in v2]
+                    W, H = H, W
+                items[i] = v2
             else:
                 items[i] = [dict(it) for it in v]
         scales, auto = dict(self.scales), dict(self.auto_scales)
@@ -2009,10 +2068,10 @@ class MainWindow(QMainWindow):
             wa.setEnabled(False)
             rm.addAction(wa)
             for text, mode in (("↻  סיבוב עם כיוון השעון", "cw"), ("↺  סיבוב נגד כיוון השעון", "ccw"),
-                               ("▯  הכול לאורך", "portrait"), ("▭  הכול לרוחב", "landscape")):
-                if scope == "page" and mode in ("portrait", "landscape"):
-                    text = "▯  לאורך" if mode == "portrait" else "▭  לרוחב"
+                               ("Aא  טקסט קריא – ישר למסך", "upright")):
                 self._act(rm, text, lambda s_=scope, m_=mode: self._rotate(s_, m_),
+                          ("כל עמוד מסובב כך שרוב הטקסט בו יהיה קריא: ישר, לא הפוך ולא על הצד. "
+                           "עמוד בלי טקסט (סריקה) לא זז. " if mode == "upright" else "") +
                           "הסיבוב נשמר בקובץ רק ב\"שמירת שינויים\". אפשר לבטל עם Ctrl+Z")
         rb = QToolButton()
         rb.setObjectName("tb")
@@ -2462,13 +2521,18 @@ class MainWindow(QMainWindow):
             return
         v = self.view
         pages = range(len(v.sizes)) if scope == "all" else [max(0, v._cur_page)]
-        n = v.rotate_pages(pages, mode)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            n = v.rotate_pages(pages, mode)
+        finally:
+            QApplication.restoreOverrideCursor()
         if n:
             self.statusBar().showMessage(
                 ("העמוד סובב" if n == 1 else f"{n} עמודים סובבו") + " — נשמר בקובץ ב\"שמירת שינויים\", Ctrl+Z מבטל", 6000)
         else:
-            self.statusBar().showMessage(("העמוד כבר" if scope == "page" else "כל העמודים כבר") +
-                                         (" לאורך" if mode == "portrait" else " לרוחב"), 4000)
+            self.statusBar().showMessage(("הטקסט בעמוד כבר קריא" if scope == "page" else
+                                          "הטקסט בכל העמודים כבר קריא") +
+                                         " (או שאין בו טקסט לזיהוי)", 4000)
 
     def delete_pages_dialog(self):
         v = self.view
