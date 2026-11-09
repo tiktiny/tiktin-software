@@ -52,6 +52,16 @@ ImageDraw.Draw(mask).text(pos, t, font=font, fill=255)
 fill = Image.new("RGBA", (S, S), (214, 32, 40, 255))
 fill.paste((243, 112, 33, 255), (S // 2, 0, S, S))
 bg.paste(fill, (0, 0), mask)
+# גרסה B: עיגול לבן קטן בפינה עם האות B, כדי לדעת איזו תוכנה מפעילים
+badge = sys.argv[6] if len(sys.argv) > 6 else ""
+if badge:
+    R = int(S * 0.36)
+    bx, by = S - R - 4, S - R - 4
+    d.ellipse((bx, by, bx + R, by + R), fill=(255, 255, 255, 255), outline=(0, 0, 0, 255), width=int(S * 0.03))
+    bf = bold_font(int(R * 0.74))
+    bb2 = d.textbbox((0, 0), badge, font=bf)
+    d.text((bx + (R - (bb2[2] - bb2[0])) / 2 - bb2[0], by + (R - (bb2[3] - bb2[1])) / 2 - bb2[1]), badge,
+           font=bf, fill=(0, 0, 0, 255))
 ic = bg.resize((256, 256), Image.LANCZOS)
 ic.save(out_ico, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
 ic.save(os.path.splitext(out_ico)[0] + ".png")

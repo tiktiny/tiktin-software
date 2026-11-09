@@ -1,14 +1,16 @@
 Unicode true
 !ifdef VARIANT_B
   !define EXE "TiktinPDF-B"
+  !define ICO "tiktin_pdf_b"
 !else
   !define EXE "TiktinPDF"
+  !define ICO "tiktin_pdf"
 !endif
 SilentInstall silent
 RequestExecutionLevel user
 Name "Tiktin PDF"
 OutFile "${ROOT}/out/${EXE}.exe"
-Icon "${ROOT}/out/tiktin_pdf.ico"
+Icon "${ROOT}/out/${ICO}.ico"
 VIProductVersion "${VERSION}.0"
 VIAddVersionKey "ProductName" "Tiktin PDF"
 VIAddVersionKey "FileDescription" "Tiktin PDF"

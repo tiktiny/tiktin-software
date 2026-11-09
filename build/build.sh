@@ -23,6 +23,10 @@ makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" launcher.nsi
 makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" installer.nsi
 # גרסה B (ממשק חדש): אותו קוד, עם הקובץ new_ui.flag שמפעיל את הממשק החדש
 touch "$ROOT/winpy/app/new_ui.flag"
+cd "$ROOT"
+python build/make_assets.py logo.png "$VER" "$DATE" "$ROOT/winpy/app/version.py" "$ROOT/out/tiktin_pdf_b.ico" B
+python -m compileall -q "$ROOT/winpy/app"
+cd build
 makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVARIANT_B launcher.nsi
 makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVARIANT_B installer.nsi
 rm -f "$ROOT/winpy/app/new_ui.flag"
