@@ -9,7 +9,7 @@ from collections import OrderedDict
 
 import pymupdf
 from PySide6.QtCore import (Qt, QTimer, QThread, Signal, QObject, QRectF,
-                            QPointF, QSettings, QSize, QMimeData)
+                            QPointF, QSettings, QSize, QMimeData, QEvent)
 from PySide6.QtGui import (QPainter, QImage, QPixmap, QColor, QIcon, QKeySequence, QTextCursor,
                            QShortcut, QPalette, QCursor, QFont)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QAbstractScrollArea,
@@ -36,8 +36,10 @@ import stamps
 from scale_detect import analyzer_main
 from cliptray import ClipTray, TRAY_STYLE
 import marks_store
+from help import HelpDialog
+from rotate_dialog import RotateDialog
 
-APP_NAME = "טיקטין PDF"
+APP_NAME = "טיקטין PDF A"
 TILE = 512                 # גודל אריח בפיקסלים של המסך
 MARGIN = 16                # שוליים סביב העמודים
 GAP = 12                   # רווח בין עמודים
@@ -1015,6 +1017,129 @@ class PdfView(QAbstractScrollArea):
         self.viewport().update()
         return True
 
+    # ----- סיבוב עמודים (ניתן לביטול עד השמירה)
+    @staticmethod
+    def _rot_items(items, W, H, d):
+        """מסובב את הסימונים יחד עם העמוד. d = 90 (עם השעון), -90 (נגד) או 180."""
+        def T(x, y):
+            if d == 90:
+                return (H - y, x)
+            if d == -90:
+                return (y, W - x)
+            return (W - x, H - y)
+
+        out = []
+        for it in items:
+            it = dict(it)
+            t = it["type"]
+            if t in ("dim", "shape"):
+                it["p1"], it["p2"] = T(*it["p1"]), T(*it["p2"])
+            elif t == "ink":
+                it["pts"] = [T(x, y) for x, y in it["pts"]]
+            elif t == "text":
+                r = A.text_rect(it)
+                cx, cy = r.center().x(), r.center().y()
+                ox, oy = it["p"][0] - cx, it["p"][1] - cy
+                nx, ny = T(cx, cy)
+                it["p"] = (nx + ox, ny + oy)          # הטקסט נשאר קריא (לא מסתובב)
+            elif "c" in it:
+                it["c"] = T(*it["c"])
+                if t == "hole":
+                    if d != 180:
+                        it["angle"] = (it.get("angle", 0) + 90) % 180
+                elif t == "mark" and it.get("kind") in ("num", "q"):
+                    pass                                # מספרים וסימן שאלה נשארים קריאים
+                else:
+                    it["angle"] = (it.get("angle", 0.0) + d) % 360
+            out.append(it)
+        return out
+
+    def _text_turn(self, i):
+        """כמה מעלות (עם השעון) צריך לסובב את העמוד כדי שרוב הטקסט יעמוד ישר וקריא. None = אין מספיק טקסט."""
+        try:
+            page = self.doc[i]
+            w = {0: 0, 90: 0, 180: 0, 270: 0}
+            for b in page.get_text("dict", flags=0)["blocks"]:
+                for ln in b.get("lines", ()):
+                    n = sum(len(sp["text"].strip()) for sp in ln["spans"])
+                    if not n:
+                        continue
+                    dx, dy = ln["dir"]
+                    a = int(round(math.degrees(math.atan2(dy, dx)) / 90.0)) * 90 % 360
+                    w[a] += n
+            a, n = max(w.items(), key=lambda kv: kv[1])
+            if n < 8:
+                return None
+            return (-(a + page.rotation)) % 360
+        except Exception:
+            return None
+
+    def rotate_pages(self, pages, mode, cw=True):
+        """mode: 'rot' = 90° / '180' / 'portrait' / 'landscape'. מחזיר את מספר העמודים שסובבו."""
+        import tempfile
+        import uuid
+        if self.editor:
+            self.finish_text_edit()
+        d0 = 90 if cw else -90
+        plan = {}
+        self.rotate_unknown = []          # עמודים שבהם אי אפשר לזהות את כיוון הטקסט (למשל סריקה)
+        for i in pages:
+            W, H = self.sizes[i]
+            if mode == "rot":
+                plan[i] = d0
+            elif mode == "180":
+                plan[i] = 180
+            elif mode in ("portrait", "landscape", "upright"):
+                t = self._text_turn(i)            # הסיבוב שמעמיד את הטקסט ישר
+                if t is None:
+                    self.rotate_unknown.append(i)
+                if mode == "upright":
+                    r = t
+                else:
+                    want_land = mode == "landscape"
+                    if t is None:
+                        r = 0 if (W > H) == want_land else d0 % 360
+                    else:
+                        land_after = (W > H) if t in (0, 180) else (H > W)
+                        if land_after == want_land:
+                            r = t                  # גם במצב הנכון וגם טקסט ישר
+                        else:
+                            # אי אפשר גם וגם: עומדים במצב שנבחר, והטקסט נקרא מלמטה למעלה (כמו מידות בשרטוט)
+                            r = (t - 90) % 360
+                if r:
+                    plan[i] = {90: 90, 180: 180, 270: -90}[r % 360]
+        if not plan:
+            return 0
+        st = self._page_state()
+        doc2 = pymupdf.open(self.src)
+        if doc2.needs_pass:
+            doc2.authenticate(self.pw or "")
+        for i, d in plan.items():
+            pg = doc2[i]
+            pg.set_rotation((pg.rotation + d) % 360)
+        dd = os.path.join(tempfile.gettempdir(), "TiktinPDF-work")
+        os.makedirs(dd, exist_ok=True)
+        tmp = os.path.join(dd, uuid.uuid4().hex + ".pdf")
+        doc2.save(tmp)
+        doc2.close()
+        items = dict(self.items)
+        for i, d in plan.items():
+            if items.get(i):
+                W, H = self.sizes[i]
+                items[i] = self._rot_items(items[i], W, H, d)
+        scales, auto = dict(self.scales), dict(self.auto_scales)
+        cur = self._reload_src(tmp, None)
+        self.undo.append(st)
+        del self.undo[:-50]
+        self.redo = []
+        self.items, self.scales, self.auto_scales = items, scales, auto
+        self.pages_changed = True
+        self.dirty = True
+        self.changed.emit()
+        self.go_page(cur)
+        self.viewport().update()
+        return len(plan)
+
     def delete_selected(self):
         if self.selected:
             i, idx = self.selected
@@ -1750,7 +1875,7 @@ class MainWindow(QMainWindow):
         logo = QLabel()
         pm = QPixmap()
         pm.loadFromData(base64.b64decode(LOGO_B64))
-        logo.setPixmap(pm.scaledToHeight(34, Qt.SmoothTransformation))
+        logo.setPixmap(pm.scaledToHeight(30, Qt.SmoothTransformation))
         logo.setContentsMargins(4, 0, 8, 0)
         tb.addWidget(logo)
         tb.addWidget(self._btn("פתיחה", "פתיחת קובץ PDF (Ctrl+O)", self.open_dialog, primary=True))
@@ -1766,10 +1891,17 @@ class MainWindow(QMainWindow):
         self._act(fm, "מחיקת עמודים...", self.delete_pages_dialog,
                   "מחיקת העמוד הנוכחי או טווח עמודים. אפשר לבטל עד השמירה")
         tb.addWidget(self._menu_btn("קובץ", "פתיחה, שמירה ומחיקת עמודים", fm))
-        tb.addWidget(self._btn("הדפסה", "הדפסה בנייר — כל הקובץ, עמוד, מסך או חלון נבחר (Ctrl+P)", self.print_dialog))
-        tb.addWidget(self._btn("העתקה", "גוררים מלבן על השרטוט: הקטע נקלט באיכות מלאה (PDF וקטורי),\n"
-                                         "מועתק להדבקה ונשמר במגש בפינה — עד 2 קטעים (Ctrl+Shift+C)",
-                               self.copy_window))
+        self.print_btn = self._btn("הדפסה", "הדפסה בנייר — כל הקובץ, עמוד, מסך או חלון נבחר (Ctrl+P).\n"
+                                            "בזמן בחירת חלון להדפסה הכפתור אדום; לחיצה נוספת או Esc מבטלים",
+                                   self._print_clicked)
+        self.print_btn.setCheckable(True)
+        tb.addWidget(self.print_btn)
+        self.copy_btn = self._btn("העתקה", "גוררים מלבן על השרטוט: הקטע נקלט באיכות מלאה (PDF וקטורי),\n"
+                                           "מועתק להדבקה ונשמר במגש בפינה — עד 2 קטעים (Ctrl+Shift+C).\n"
+                                           "בזמן הבחירה הכפתור אדום; לחיצה נוספת או Esc מבטלים",
+                                  self._copy_clicked)
+        self.copy_btn.setCheckable(True)
+        tb.addWidget(self.copy_btn)
 
         # ----- הוסף
         am = self._menu(self)
@@ -1809,6 +1941,7 @@ class MainWindow(QMainWindow):
         self.add_btn = self._menu_btn("הוסף", "הוספה לשרטוט: חורים, תחנת שנאים, קווים, חצים, צורות, סימנים, "
                                               "טקסט, עט וחותמות", am, checkable=True)
         tb.addWidget(self.add_btn)
+        self.add_btn.installEventFilter(self)
 
         # ----- מדידה
         mm2 = self._menu(self)
@@ -1818,13 +1951,22 @@ class MainWindow(QMainWindow):
                   "מסמנים קו שאורכו ידוע ומקלידים את אורכו האמיתי — הקנ\"מ יחושב")
         self._act(mm2, "בדיקת קנ\"מ מחדש מול המידות", self._reanalyze,
                   "מבטל קנ\"מ שנקבע ידנית בעמוד ובודק שוב לפי הכיתוב והמידות בשרטוט")
-        self.measure_btn = self._menu_btn("מדידה", "מדידת מרחק, כיול ובדיקת קנה המידה", mm2, checkable=True)
+        mb = QToolButton()
+        mb.setObjectName("tbsplit")
+        mb.setText("מדידה")
+        mb.setCheckable(True)
+        mb.setToolTip("לחיצה: מתחילים למדוד (שתי הקלקות על השרטוט, התוצאה בס\"מ).\n"
+                      "לחיצה נוספת או Esc: מפסיקים.  החץ הקטן: כיול ובדיקת קנ\"מ")
+        mb.setPopupMode(QToolButton.MenuButtonPopup)
+        mb.setMenu(mm2)
+        mb.clicked.connect(self._measure_toggle)
+        self.measure_btn = mb
         tb.addWidget(self.measure_btn)
         self.scale_box = QComboBox()
         self.scale_box.setEditable(True)
         self.scale_box.setInsertPolicy(QComboBox.NoInsert)
         self.scale_box.addItems(["1:20", "1:25", "1:50", "1:100", "1:200", "1:250", "1:500"])
-        self.scale_box.setFixedWidth(78)
+        self.scale_box.setFixedWidth(68)
         self.scale_box.lineEdit().setAlignment(Qt.AlignCenter)
         self.scale_box.setToolTip("קנה המידה של העמוד הנוכחי — מזוהה ומאומת אוטומטית. אפשר לבחור או להקליד, למשל 1:50")
         self.scale_box.textActivated.connect(self._scale_text)
@@ -1874,25 +2016,27 @@ class MainWindow(QMainWindow):
 
         # ----- עמוד וזום
         self.page_edit = QLineEdit()
-        self.page_edit.setFixedWidth(46)
+        self.page_edit.setFixedWidth(40)
         self.page_edit.setAlignment(Qt.AlignCenter)
         self.page_edit.setToolTip("מספר עמוד — הקלידו ולחצו Enter")
         self.page_edit.returnPressed.connect(self._goto_page)
         tb.addWidget(self.page_edit)
         self.page_total = QLabel(" / – ")
         tb.addWidget(self.page_total)
+        tb.addWidget(self._btn("סיבוב", "סיבוב העמוד הנוכחי או כל העמודים — עם או נגד כיוון השעון, "
+                                          "או להעמיד הכול לאורך / לרוחב (Ctrl+R)", self.rotate_dialog))
         tb.addWidget(self._btn("−", "הקטנה (Ctrl+-)", lambda: self.view.set_zoom(self.view.zoom / 1.25)))
         self.zoom_box = QComboBox()
         self.zoom_box.setEditable(True)
         self.zoom_box.setInsertPolicy(QComboBox.NoInsert)
         self.zoom_box.addItems(["25%", "50%", "75%", "100%", "150%", "200%", "400%", "800%", "1600%"])
-        self.zoom_box.setFixedWidth(72)
+        self.zoom_box.setFixedWidth(66)
         self.zoom_box.setToolTip("אחוז זום — בחרו או הקלידו")
         self.zoom_box.lineEdit().setAlignment(Qt.AlignCenter)
         self.zoom_box.textActivated.connect(self._zoom_text)
         tb.addWidget(self.zoom_box)
         tb.addWidget(self._btn("+", "הגדלה (Ctrl++)", lambda: self.view.set_zoom(self.view.zoom * 1.25)))
-        tb.addWidget(self._btn("מלא", "הצגת העמוד כולו במסך (Ctrl+0)", self.view.fit_page))
+        tb.addWidget(self._btn("⛶", "עמוד מלא — הצגת העמוד כולו במסך (Ctrl+0)", self.view.fit_page))
         vm = self._menu(self)
         self._act(vm, "התאמה לרוחב", self.view.fit_width, shortcut="Ctrl+2")
         self._act(vm, "עמוד מלא", self.view.fit_page, shortcut="Ctrl+0")
@@ -1903,10 +2047,12 @@ class MainWindow(QMainWindow):
         self.wheel_act.setToolTip("כשמסומן: הגלגלת מגדילה ומקטינה כמו באוטוקד, ו-Ctrl+גלגלת גולל")
         self.wheel_act.toggled.connect(self._wheel_mode)
         self._act(vm, "מסך מלא", self._toggle_full, shortcut="F11")
+        vm.addSeparator()
+        self._act(vm, "הוראות הפעלה", self.show_help, shortcut="F1")
         tb.addWidget(self._menu_btn("תצוגה", "התאמה לרוחב, 100%, מצב גלגלת ומסך מלא", vm))
         ver = QLabel(f" גרסה {VERSION} | {BUILD_DATE} ")
         ver.setObjectName("ver")
-        ver.setToolTip(f"גרסה {VERSION}, עודכנה {BUILD_DATE}")
+        ver.setToolTip(f"גרסה {VERSION}, עודכנה {BUILD_DATE}. F1 = הוראות הפעלה")
         self.statusBar().addPermanentWidget(ver)
 
         self.tool_btns = {}
@@ -1929,7 +2075,9 @@ class MainWindow(QMainWindow):
                         ("Ctrl+0", self.view.fit_page),
                         ("Ctrl+2", self.view.fit_width),
                         ("Ctrl+1", lambda: self.view.set_zoom(1.0)),
-                        ("F11", self._toggle_full)):
+                        ("F11", self._toggle_full),
+                        ("F1", self.show_help),
+                        ("Ctrl+R", self.rotate_dialog)):
             QShortcut(QKeySequence(seq), self, activated=fn)
 
     # ----- תפריט הוסף
@@ -2025,10 +2173,48 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("מקליקים על השרטוט במקום החותמת. Esc מבטל")
         v.setFocus()
 
+    def _measure_toggle(self):
+        if self.view.tool in ("dim", "calib"):
+            self.view.set_tool("pan")
+        else:
+            self._tool_clicked("dim", True)
+            if self.view.tool != "dim":
+                self._on_tool(self.view.tool)
+
     def _reanalyze(self):
         if self._need_doc():
             self.view.reanalyze()
             self._show_scale()
+
+    ADD_TOOLS = ("hole", "pen", "erase", "text", "trafo", "shape", "mark", "stamp")
+
+    def eventFilter(self, obj, ev):
+        # כשכלי הוספה פעיל, לחיצה על "הוסף" מפסיקה אותו (במקום לפתוח שוב את התפריט)
+        if obj is getattr(self, "add_btn", None) and ev.type() == QEvent.MouseButtonPress \
+                and self.view.tool in self.ADD_TOOLS:
+            self.view.set_tool("pan")
+            self.statusBar().clearMessage()
+            return True
+        return super().eventFilter(obj, ev)
+
+    def _copy_clicked(self):
+        v = self.view
+        if v.select_mode and v.select_purpose == "copy":
+            v.cancel_select()
+            self.statusBar().clearMessage()
+        else:
+            self.copy_window()
+        self._sync_ctx()
+
+    def _print_clicked(self):
+        v = self.view
+        if v.select_mode and v.select_purpose == "print":
+            v.cancel_select()
+            v.select_cancelled.emit()
+            self.statusBar().clearMessage()
+        else:
+            self.print_dialog()
+        self._sync_ctx()
 
     def _sync_ctx(self):
         """מציג את עובי הקו ואת גודל האות רק כשהם רלוונטיים, כדי שהסרגל יישאר נקי."""
@@ -2038,6 +2224,24 @@ class MainWindow(QMainWindow):
             sel_t = v.items[v.selected[0]][v.selected[1]]["type"]
         self.width_act.setVisible(v.tool in ("pen", "shape") or sel_t in ("ink", "shape"))
         self.tsize_act.setVisible(v.tool == "text" or sel_t == "text" or v.editing is not None)
+        # כפתור של פעולה פעילה נצבע באדום
+        for b, on in ((getattr(self, "copy_btn", None), v.select_mode and v.select_purpose == "copy"),
+                      (getattr(self, "print_btn", None), v.select_mode and v.select_purpose == "print"),
+                      (getattr(self, "add_btn", None), v.tool in self.ADD_TOOLS),
+                      (getattr(self, "measure_btn", None), v.tool in ("dim", "calib"))):
+            if b is not None and b.isChecked() != bool(on):
+                b.blockSignals(True)
+                b.setChecked(bool(on))
+                b.blockSignals(False)
+
+    def show_help(self):
+        if getattr(self, "_help", None) is not None:
+            self._help.raise_()
+            self._help.activateWindow()
+            return
+        self._help = HelpDialog(self, f"גרסה {VERSION} | {BUILD_DATE}")
+        self._help.destroyed.connect(lambda *_: setattr(self, "_help", None))
+        self._help.show()
 
     def _toggle_full(self):
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
@@ -2328,6 +2532,59 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"נשמר: {os.path.basename(target)}", 6000)
         return True
 
+    def rotate_dialog(self):
+        v = self.view
+        if not self._need_doc():
+            return
+        n = len(v.sizes)
+        cur = max(0, v._cur_page)
+        dlg = RotateDialog(self, n, cur + 1)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        pages = range(n) if dlg.scope == "all" else [cur]
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            k = v.rotate_pages(list(pages), dlg.mode, dlg.cw)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, APP_NAME, f"הסיבוב נכשל:\n{e}")
+            return
+        QApplication.restoreOverrideCursor()
+        unknown = getattr(v, "rotate_unknown", []) if dlg.mode in ("portrait", "landscape", "upright") else []
+        if k == 0 and not unknown:
+            self.statusBar().showMessage("כל העמודים כבר במצב שנבחר — לא היה מה לסובב", 6000)
+        elif k:
+            self.statusBar().showMessage(f"סובבו {k} עמודים. UNDO מחזיר; הקובץ עצמו משתנה רק ב\"שמירת שינויים\"", 8000)
+        if unknown:
+            pages_txt = self._page_ranges(unknown)
+            allp = len(unknown) == n if dlg.scope == "all" else True
+            why = ("הקובץ סרוק כתמונה ואין בו טקסט שהמחשב יכול לקרוא" if allp else
+                   "אין בעמודים האלה טקסט שהמחשב יכול לקרוא (כנראה סריקה או שרטוט בלי טקסט)")
+            if dlg.mode == "upright":
+                todo = ("העמודים האלה לא סובבו.\n"
+                        "כדי ליישר אותם: סיבוב ← סיבוב 90° (עם או נגד כיוון השעון) או היפוך 180°.")
+            else:
+                todo = ("העמודים האלה סובבו רק לפי הכיוון שבחרת, ולא נבדק שהטקסט לא הפוך.\n"
+                        "אם עמוד יצא הפוך: סיבוב ← היפוך 180°.")
+            QMessageBox.information(
+                self, APP_NAME,
+                f"לא ניתן לזהות את כיוון הטקסט בעמודים: {pages_txt}\n({why}).\n\n{todo}")
+
+    @staticmethod
+    def _page_ranges(pages):
+        """[0,1,2,5] -> '1–3, 6'"""
+        out, run = [], []
+        for p in sorted(pages):
+            if run and p == run[-1] + 1:
+                run.append(p)
+            else:
+                if run:
+                    out.append(run)
+                run = [p]
+        if run:
+            out.append(run)
+        return ", ".join(f"{r[0] + 1}" if len(r) == 1 else f"{r[0] + 1}–{r[-1] + 1}" for r in out)
+
     def delete_pages_dialog(self):
         v = self.view
         if not self._need_doc():
@@ -2472,17 +2729,22 @@ class MainWindow(QMainWindow):
 
 STYLE = f"""
 QMainWindow {{ background: #ffffff; }}
-QToolBar {{ background: #ffffff; border: none; border-bottom: 1px solid #d4d8de; padding: 4px 4px; spacing: 4px; }}
+QToolBar {{ background: #ffffff; border: none; border-bottom: 1px solid #d4d8de; padding: 4px 3px; spacing: 3px; }}
 QToolButton#tb {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
-                  padding: 0 8px; min-height: 30px; max-height: 30px; font-size: 10pt; }}
+                  padding: 0 6px; min-height: 30px; max-height: 30px; font-size: 10pt; }}
 QToolButton#tb::menu-indicator {{ image: none; width: 0; }}
+QToolButton#tbsplit {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
+                      padding: 0 22px 0 8px; min-height: 30px; max-height: 30px; font-size: 10pt; }}
+QToolButton#tbsplit:hover {{ background: #f2f4f7; }}
+QToolButton#tbsplit:checked {{ background: {ACCENT}; border-color: {ACCENT}; color: #ffffff; font-weight: 600; }}
+QToolButton#tbsplit::menu-button {{ border: none; border-right: 1px solid #cfd4db; width: 16px; }}
 QToolButton#tbur {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
                     padding: 0 4px; min-height: 30px; max-height: 30px; font-size: 7.5pt; }}
 QToolButton#tbur:hover {{ background: #f2f4f7; }}
 QToolButton#tb:hover {{ background: #f2f4f7; }}
-QToolButton#tb:checked {{ background: #fbe9eb; border-color: {ACCENT}; color: {ACCENT}; }}
+QToolButton#tb:checked {{ background: {ACCENT}; border-color: {ACCENT}; color: #ffffff; font-weight: 600; }}
 QToolButton#primary {{ color: #ffffff; background: {ACCENT}; border: 1px solid {ACCENT}; border-radius: 4px;
-                       padding: 0 12px; min-height: 30px; max-height: 30px; font-size: 10pt; font-weight: 600; }}
+                       padding: 0 10px; min-height: 30px; max-height: 30px; font-size: 10pt; font-weight: 600; }}
 QToolButton#primary:hover {{ background: #a91a27; }}
 QLineEdit, QComboBox {{ background: #ffffff; color: #1f2630; border: 1px solid #cfd4db; border-radius: 4px;
                         min-height: 30px; max-height: 30px; font-size: 10pt; }}
