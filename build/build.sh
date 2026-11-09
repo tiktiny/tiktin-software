@@ -14,7 +14,7 @@ python -m pip install -q --no-deps --only-binary=:all: --platform win_amd64 --py
 python build/trim.py "$ROOT/winpy"
 curl -sL -o logo.png https://raw.githubusercontent.com/tiktiny/tiktin-tools/main/tiktin-logo.png
 mkdir -p "$ROOT/winpy/app" "$ROOT/out"
-python build/make_assets.py logo.png "$VER" "$DATE" "$ROOT/winpy/app/version.py" "$ROOT/out/tiktin_pdf.ico"
+python build/make_assets.py logo.png "$VER" "$DATE" "$ROOT/winpy/app/version.py" "$ROOT/out/tiktin_pdf.ico" A
 cp src/*.py "$ROOT/winpy/app/"
 cp -r src/fonts "$ROOT/winpy/app/"
 python -m compileall -q "$ROOT/winpy/app"
