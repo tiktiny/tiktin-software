@@ -21,4 +21,9 @@ python -m compileall -q "$ROOT/winpy/app"
 cd build
 makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" launcher.nsi
 makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" installer.nsi
+# גרסה B (ממשק חדש): אותו קוד, עם הקובץ new_ui.flag שמפעיל את הממשק החדש
+touch "$ROOT/winpy/app/new_ui.flag"
+makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVARIANT_B launcher.nsi
+makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVARIANT_B installer.nsi
+rm -f "$ROOT/winpy/app/new_ui.flag"
 ls -la "$ROOT/out"
