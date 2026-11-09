@@ -30,6 +30,7 @@ from hole_dialog import HoleDialog
 from text_dialog import HebrewKeyboard
 from inline_text import InlineText
 from colors import ColorButton
+from help_dialog import HelpDialog
 import annotations as A
 from annotations_extra import EXTRA, SHAPE_NAMES, MARK_NAMES
 import annotations_extra as AX
@@ -2077,7 +2078,7 @@ class MainWindow(QMainWindow):
         rb.setObjectName("tb")
         rb.setIcon(self._glyph_icon("⟳"))
         rb.setIconSize(QSize(18, 18))
-        rb.setToolTip("סיבוב עמודים: עמוד זה או כל הדפים, עם או נגד כיוון השעון, או לאורך / לרוחב")
+        rb.setToolTip("סיבוב עמודים: עמוד זה או כל הדפים, עם או נגד כיוון השעון, או יישור כך שהטקסט יהיה קריא")
         rb.setPopupMode(QToolButton.InstantPopup)
         rb.setMenu(rm)
         tb.addWidget(rb)
@@ -2091,7 +2092,9 @@ class MainWindow(QMainWindow):
         self.wheel_act.setToolTip("כשמסומן: הגלגלת מגדילה ומקטינה כמו באוטוקד, ו-Ctrl+גלגלת גולל")
         self.wheel_act.toggled.connect(self._wheel_mode)
         self._act(vm, "מסך מלא", self._toggle_full, shortcut="F11")
-        tb.addWidget(self._menu_btn("תצוגה", "התאמה לרוחב, 100%, מצב גלגלת ומסך מלא", vm))
+        vm.addSeparator()
+        self._act(vm, "הוראות הפעלה", self.show_help, shortcut="F1")
+        tb.addWidget(self._menu_btn("תצוגה", "התאמה לרוחב, 100%, מצב גלגלת, מסך מלא והוראות הפעלה (F1)", vm))
         ver = QLabel(f" גרסה {VARIANT}{VERSION} | {BUILD_DATE} ")
         ver.setObjectName("ver")
         ver.setToolTip(f"גרסה {VARIANT}{VERSION} ({'ממשק חדש' if NEW_UI else 'ממשק קיים'}), עודכנה {BUILD_DATE}")
@@ -2117,7 +2120,8 @@ class MainWindow(QMainWindow):
                         ("Ctrl+0", self.view.fit_page),
                         ("Ctrl+2", self.view.fit_width),
                         ("Ctrl+1", lambda: self.view.set_zoom(1.0)),
-                        ("F11", self._toggle_full)):
+                        ("F11", self._toggle_full),
+                        ("F1", self.show_help)):
             QShortcut(QKeySequence(seq), self, activated=fn)
 
     # ----- תפריט הוסף
@@ -2515,6 +2519,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: v.go_page(page))
         self.statusBar().showMessage(f"נשמר: {os.path.basename(target)}", 6000)
         return True
+
+    def show_help(self):
+        HelpDialog(self, APP_NAME, f"{VARIANT}{VERSION}", BUILD_DATE).exec()
 
     def _rotate(self, scope, mode):
         if not self._need_doc():
