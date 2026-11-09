@@ -16,6 +16,7 @@ curl -sL -o logo.png https://raw.githubusercontent.com/tiktiny/tiktin-tools/main
 mkdir -p "$ROOT/winpy/app" "$ROOT/out"
 python build/make_assets.py logo.png "$VER" "$DATE" "$ROOT/winpy/app/version.py" "$ROOT/out/tiktin_pdf.ico"
 cp src/*.py "$ROOT/winpy/app/"
+cp -r src/fonts "$ROOT/winpy/app/"
 python -m compileall -q "$ROOT/winpy/app"
 cd build
 makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" launcher.nsi
