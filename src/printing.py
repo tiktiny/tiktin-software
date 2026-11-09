@@ -185,7 +185,7 @@ class PrintDialog(QDialog):
         self.pv.setAlignment(Qt.AlignCenter)
         self.pv.setMinimumSize(300, 300)
         self.pv.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.pv.setStyleSheet("background:#d9dde3; border:none; color:#5a6270;")
+        self.pv.setStyleSheet("background:#b9bfc0; border:none; color:#24282b;")
         lay.addWidget(self.pv, 1)
         nav = QHBoxLayout()
         self.prev_b = QPushButton("הקודם")

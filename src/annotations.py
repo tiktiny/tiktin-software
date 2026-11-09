@@ -7,7 +7,7 @@ from PySide6.QtGui import QPen, QColor, QFont, QPainterPath, QPolygonF, QBrush
 PT_PER_MM = 72.0 / 25.4
 HOLE_COLOR = "#d0021b"
 DIM_COLOR = "#0057b8"
-SEL_COLOR = "#ff8a00"
+SEL_COLOR = "#24282b"
 LABEL_PT = 7.0            # גובה טקסט על הנייר (כ-2.5 מ"מ)
 PRINT_LINE_PT = 0.8       # עובי קו בהדפסה ובשמירה
 KIND_NAME = {"floor": "חור ברצפה", "ceil": "חור בתקרה", "wall": "חור בקיר"}

@@ -11,7 +11,7 @@ import pymupdf
 from PySide6.QtCore import (Qt, QTimer, QThread, Signal, QObject, QRectF,
                             QPointF, QSettings, QSize, QMimeData)
 from PySide6.QtGui import (QPainter, QImage, QPixmap, QColor, QIcon, QKeySequence, QTextCursor,
-                           QShortcut, QPalette, QCursor, QFont)
+                           QShortcut, QPalette, QCursor, QFont, QPen)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QAbstractScrollArea,
                                QToolBar, QToolButton, QLabel, QLineEdit, QComboBox,
                                QFileDialog, QMessageBox, QInputDialog, QWidget,
@@ -43,8 +43,15 @@ MARGIN = 16                # שוליים סביב העמודים
 GAP = 12                   # רווח בין עמודים
 CACHE_BYTES = 700 * 2**20  # תקרת זיכרון לאריחים מוכנים
 MIN_ZOOM, MAX_ZOOM = 0.02, 64.0
-CANVAS_BG = QColor("#d9dde3")
-ACCENT = "#c8202f"
+CANVAS_BG = QColor("#b9bfc0")   # שולחן אור סביב הדף
+ACCENT = "#c41c2d"              # אדום טיקטין: רק סימונים והכלי הפעיל
+GRAPHITE = "#24282b"            # טקסט, אייקונים
+STEEL = "#5c6367"               # טקסט משני
+CHROME = "#eef0ef"              # נייר שקיפה: מסגרת התוכנה
+HAIR = "#cdd2d1"                # קווים דקים
+SUGGEST = "#f68223"             # כתום: הצעות של התוכנה
+SUGGEST_TXT = "#9a4306"
+SUGGEST_BG = "#fff4ea"
 
 
 # ---------------------------------------------------------------- rendering pool
@@ -628,7 +635,7 @@ class PdfView(QAbstractScrollArea):
         p = QPainter(self.viewport())
         p.fillRect(self.viewport().rect(), CANVAS_BG)
         if not self.sizes:
-            p.setPen(QColor("#5a6270"))
+            p.setPen(QColor(STEEL))
             f = p.font()
             f.setPointSize(13)
             p.setFont(f)
@@ -642,7 +649,7 @@ class PdfView(QAbstractScrollArea):
         exact = abs(self.tscale - cur_s) < 1e-6
         for i in self.visible_pages():
             r = self.page_rect(i)
-            p.fillRect(r.adjusted(1, 1, 3, 3), QColor(0, 0, 0, 40))
+            p.fillRect(r.adjusted(-1, -1, 1, 1), QColor("#9aa0a2"))
             p.fillRect(r, Qt.white)
             needed = [(self.docgen, i, sk, tx, ty) for tx, ty in self._needed_tiles(i, self.tscale)]
             complete = exact and needed and all(k in self.tiles for k in needed)
@@ -681,9 +688,9 @@ class PdfView(QAbstractScrollArea):
         if self._sel:
             a, b = self._sel
             sr = QRectF(a, b).normalized()
-            p.fillRect(sr, QColor(200, 32, 47, 28))
+            p.fillRect(sr, QColor(36, 40, 43, 22))
             pen = p.pen()
-            pen.setColor(QColor(ACCENT))
+            pen.setColor(QColor(GRAPHITE))
             pen.setStyle(Qt.DashLine)
             pen.setWidthF(1.5)
             p.setPen(pen)
@@ -695,10 +702,17 @@ class PdfView(QAbstractScrollArea):
             f.setPointSizeF(9.5)
             p.setFont(f)
             fm = p.fontMetrics()
-            w = fm.horizontalAdvance(b[0]) + 18
-            rr = QRectF(self.viewport().width() - w - 10, 8, w, fm.height() + 8)
-            p.setPen(QColor("#cfd4db"))
-            p.setBrush(QColor(255, 255, 255, 235))
+            w = fm.horizontalAdvance(b[0]) + 22
+            rr = QRectF(self.viewport().width() - w - 10, 10, w, fm.height() + 10)
+            if b[1] == SUGGEST_TXT:
+                p.setPen(QPen(QColor(SUGGEST), 1.2))
+                p.setBrush(QColor(SUGGEST_BG))
+            elif "✓" in b[0] or b[1] == GRAPHITE:
+                p.setPen(QPen(QColor(GRAPHITE), 1.2))
+                p.setBrush(QColor("#ffffff"))
+            else:
+                p.setPen(QColor(HAIR))
+                p.setBrush(QColor("#ffffff"))
             p.drawRoundedRect(rr, 4, 4)
             p.setPen(QColor(b[1]))
             p.drawText(rr, Qt.AlignCenter, b[0])
@@ -828,20 +842,20 @@ class PdfView(QAbstractScrollArea):
         if i < 0 or not self.sizes:
             return None
         if i in self.scales:
-            return f"קנ\"מ 1:{self.scales[i]:.4g}  (נקבע ידנית)", "#1f2630"
+            return f"קנ\"מ 1:{self.scales[i]:.4g}  (נקבע ידנית)", GRAPHITE
         r = self.scale_info.get(i)
         if not r or r.get("quick"):
             if i in self._asked:
-                return "בודק קנ\"מ...", "#7a828e"
+                return "בודק קנ\"מ...", STEEL
             return None
         d, t = r.get("dims"), r.get("text")
         if d and t and d != t:
-            return f"קנ\"מ 1:{d} ✓ לפי המידות (בכיתוב 1:{t})", "#c8202f"
+            return f"קנ\"מ 1:{d} ✓ לפי המידות (בכיתוב 1:{t})", SUGGEST_TXT
         if d:
-            return f"קנ\"מ 1:{d} ✓ אומת מול המידות", "#1a7f37"
+            return f"קנ\"מ 1:{d} ✓ אומת מול המידות", GRAPHITE
         if t:
-            return f"קנ\"מ 1:{t} לפי הכיתוב — לא אומת", "#9a6700"
-        return "קנ\"מ לא זוהה — מומלץ לכייל", "#9a6700"
+            return f"קנ\"מ 1:{t} לפי הכיתוב — לא אומת", SUGGEST_TXT
+        return "קנ\"מ לא זוהה — מומלץ לכייל", SUGGEST_TXT
 
     def set_scale(self, i, S):
         self.scales[i] = S
@@ -2471,54 +2485,73 @@ class MainWindow(QMainWindow):
 
 
 STYLE = f"""
-QMainWindow {{ background: #ffffff; }}
-QToolBar {{ background: #ffffff; border: none; border-bottom: 1px solid #d4d8de; padding: 4px 4px; spacing: 4px; }}
-QToolButton#tb {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
-                  padding: 0 8px; min-height: 30px; max-height: 30px; font-size: 10pt; }}
+* {{ font-family: "IBM Plex Sans Hebrew", "Segoe UI"; }}
+QMainWindow {{ background: {CHROME}; }}
+QToolBar {{ background: {CHROME}; border: none; border-bottom: 1px solid {HAIR}; padding: 6px 4px; spacing: 2px; }}
+QToolBar::separator {{ background: {HAIR}; width: 1px; margin: 6px 6px; }}
+QToolButton#tb {{ color: {GRAPHITE}; background: transparent; border: 1px solid transparent; border-radius: 6px;
+                  padding: 0 8px; min-height: 34px; max-height: 34px; font-size: 10pt; font-weight: 500; }}
 QToolButton#tb::menu-indicator {{ image: none; width: 0; }}
-QToolButton#tbur {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
-                    padding: 0 4px; min-height: 30px; max-height: 30px; font-size: 7.5pt; }}
-QToolButton#tbur:hover {{ background: #f2f4f7; }}
-QToolButton#tb:hover {{ background: #f2f4f7; }}
-QToolButton#tb:checked {{ background: #fbe9eb; border-color: {ACCENT}; color: {ACCENT}; }}
-QToolButton#primary {{ color: #ffffff; background: {ACCENT}; border: 1px solid {ACCENT}; border-radius: 4px;
-                       padding: 0 12px; min-height: 30px; max-height: 30px; font-size: 10pt; font-weight: 600; }}
-QToolButton#primary:hover {{ background: #a91a27; }}
-QLineEdit, QComboBox {{ background: #ffffff; color: #1f2630; border: 1px solid #cfd4db; border-radius: 4px;
-                        min-height: 30px; max-height: 30px; font-size: 10pt; }}
+QToolButton#tb:hover {{ background: #e3e6e5; }}
+QToolButton#tb:pressed {{ background: #d9dddc; }}
+QToolButton#tb:checked {{ background: #ffffff; border: 1px solid {HAIR}; border-bottom: 3px solid {ACCENT};
+                          color: {GRAPHITE}; font-weight: 600; }}
+QToolButton#tb:disabled {{ color: #9aa0a2; }}
+QToolButton#tbur {{ color: {GRAPHITE}; background: transparent; border: 1px solid transparent; border-radius: 6px;
+                    padding: 0 4px; min-height: 34px; max-height: 34px; font-size: 7.5pt; }}
+QToolButton#tbur:hover {{ background: #e3e6e5; }}
+QToolButton#primary {{ color: #ffffff; background: {GRAPHITE}; border: 1px solid {GRAPHITE}; border-radius: 6px;
+                       padding: 0 12px; min-height: 34px; max-height: 34px; font-size: 10pt; font-weight: 600; }}
+QToolButton#primary:hover {{ background: #3a3f43; }}
+QLineEdit, QComboBox {{ background: #ffffff; color: {GRAPHITE}; border: 1px solid #b9bfc0; border-radius: 6px;
+                        min-height: 32px; max-height: 32px; font-size: 10pt; padding: 0 4px; }}
+QLineEdit:focus, QComboBox:focus {{ border: 1px solid {GRAPHITE}; }}
 QComboBox::drop-down {{ border: none; width: 22px; }}
-QComboBox QAbstractItemView {{ background: #ffffff; color: #1f2630; }}
-QLabel {{ color: #1f2630; font-size: 10pt; }}
+QComboBox QAbstractItemView {{ background: #ffffff; color: {GRAPHITE}; border: 1px solid {HAIR};
+                               selection-background-color: {CHROME}; selection-color: {GRAPHITE}; outline: none; }}
+QMenu {{ background: #ffffff; color: {GRAPHITE}; border: 1px solid {HAIR}; border-radius: 8px; padding: 6px; font-size: 10pt; }}
+QMenu::item {{ padding: 8px 14px 8px 30px; border-radius: 5px; margin: 1px 0; }}
+QMenu::item:selected {{ background: {CHROME}; color: {GRAPHITE}; }}
+QMenu::item:disabled {{ color: #9aa0a2; }}
+QMenu::separator {{ height: 1px; background: #e3e6e5; margin: 5px 8px; }}
+QMenu::right-arrow, QMenu::left-arrow {{ width: 10px; height: 10px; }}
+QLabel {{ color: {GRAPHITE}; font-size: 10pt; }}
 QDialog {{ background: #ffffff; }}
-QPushButton#seg {{ background: #ffffff; color: #1f2630; border: 1px solid #cfd4db; border-radius: 0;
-                   min-height: 32px; max-height: 32px; padding: 0 14px; font-size: 10pt; margin-left: -1px; }}
-QPushButton#seg:checked {{ background: {ACCENT}; color: #ffffff; border-color: {ACCENT}; }}
-QPushButton#seg:hover:!checked {{ background: #f2f4f7; }}
-QPushButton#primaryBtn {{ background: {ACCENT}; color: #ffffff; border: 1px solid {ACCENT}; border-radius: 4px;
-                          min-height: 32px; padding: 0 22px; font-size: 10pt; font-weight: 600; }}
-QPushButton#plainBtn {{ background: #ffffff; color: #1f2630; border: 1px solid #cfd4db; border-radius: 4px;
-                        min-height: 32px; padding: 0 22px; font-size: 10pt; }}
-QSpinBox {{ background: #ffffff; color: #1f2630; border: 1px solid #cfd4db; border-radius: 4px;
-            min-height: 30px; max-height: 30px; font-size: 10pt; }}
-QStatusBar {{ background: #ffffff; color: {ACCENT}; font-size: 10pt; }}
+QPushButton#seg {{ background: #ffffff; color: {GRAPHITE}; border: 1px solid {HAIR}; border-radius: 0;
+                   min-height: 34px; max-height: 34px; padding: 0 14px; font-size: 10pt; margin-left: -1px; }}
+QPushButton#seg:checked {{ background: {GRAPHITE}; color: #ffffff; border-color: {GRAPHITE}; font-weight: 600; }}
+QPushButton#seg:hover:!checked {{ background: {CHROME}; }}
+QPushButton#primaryBtn {{ background: {GRAPHITE}; color: #ffffff; border: 1px solid {GRAPHITE}; border-radius: 6px;
+                          min-height: 34px; padding: 0 22px; font-size: 10pt; font-weight: 600; }}
+QPushButton#primaryBtn:hover {{ background: #3a3f43; }}
+QPushButton#plainBtn {{ background: #ffffff; color: {GRAPHITE}; border: 1px solid {HAIR}; border-radius: 6px;
+                        min-height: 34px; padding: 0 22px; font-size: 10pt; }}
+QPushButton#plainBtn:hover {{ background: {CHROME}; }}
+QSpinBox, QDoubleSpinBox {{ background: #ffffff; color: {GRAPHITE}; border: 1px solid #b9bfc0; border-radius: 6px;
+            min-height: 32px; max-height: 32px; font-size: 10pt; }}
+QCheckBox, QRadioButton {{ color: {GRAPHITE}; font-size: 10pt; }}
+QStatusBar {{ background: {CHROME}; color: {GRAPHITE}; border-top: 1px solid {HAIR}; font-size: 9.5pt; min-height: 26px; }}
+QStatusBar::item {{ border: none; }}
 QProgressDialog {{ background: #ffffff; }}
-QLabel#ver {{ color: #7a828e; font-size: 9pt; }}
-QToolTip {{ background: #ffffff; color: #1f2630; border: 1px solid #cfd4db; }}
+QLabel#ver {{ color: {STEEL}; font-size: 9pt; }}
+QToolTip {{ background: #ffffff; color: {GRAPHITE}; border: 1px solid {HAIR}; padding: 4px 6px; }}
 QScrollBar:vertical {{ background: {CANVAS_BG.name()}; width: 12px; }}
 QScrollBar:horizontal {{ background: {CANVAS_BG.name()}; height: 12px; }}
-QScrollBar::handle {{ background: #a9b0ba; border-radius: 5px; min-height: 30px; min-width: 30px; margin: 2px; }}
+QScrollBar::handle {{ background: #8e9597; border-radius: 5px; min-height: 30px; min-width: 30px; margin: 2px; }}
+QScrollBar::handle:hover {{ background: #6f7679; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
 """
 
 
 def light_palette():
     pal = QPalette()
-    for role, c in ((QPalette.Window, "#ffffff"), (QPalette.WindowText, "#1f2630"),
+    for role, c in ((QPalette.Window, CHROME), (QPalette.WindowText, GRAPHITE),
                     (QPalette.Base, "#ffffff"), (QPalette.AlternateBase, "#f4f6f8"),
-                    (QPalette.Text, "#1f2630"), (QPalette.Button, "#ffffff"),
-                    (QPalette.ButtonText, "#1f2630"), (QPalette.Highlight, ACCENT),
+                    (QPalette.Text, GRAPHITE), (QPalette.Button, "#ffffff"),
+                    (QPalette.ButtonText, GRAPHITE), (QPalette.Highlight, GRAPHITE),
                     (QPalette.HighlightedText, "#ffffff"), (QPalette.ToolTipBase, "#ffffff"),
-                    (QPalette.ToolTipText, "#1f2630")):
+                    (QPalette.ToolTipText, GRAPHITE)):
         pal.setColor(role, QColor(c))
     return pal
 
@@ -2538,6 +2571,21 @@ def _clean_temp():
             pass
 
 
+def _load_fonts(app):
+    """IBM Plex Sans Hebrew מותקן יחד עם התוכנה. אם לא נמצא, נשאר הגופן של Windows."""
+    from PySide6.QtGui import QFontDatabase
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+    ok = False
+    for w in ("Regular", "Medium", "SemiBold", "Bold"):
+        fp = os.path.join(d, f"IBMPlexSansHebrew-{w}.ttf")
+        if os.path.exists(fp) and QFontDatabase.addApplicationFont(fp) >= 0:
+            ok = True
+    if ok:
+        f = QFont("IBM Plex Sans Hebrew", 10)
+        f.setStyleStrategy(QFont.PreferAntialias)
+        app.setFont(f)
+
+
 def main():
     if sys.platform == "win32":
         try:
@@ -2549,6 +2597,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
+    _load_fonts(app)
     app.setPalette(light_palette())
     app.setLayoutDirection(Qt.RightToLeft)
     app.setStyleSheet(STYLE + TRAY_STYLE)
