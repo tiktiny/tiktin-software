@@ -1,0 +1,24 @@
+name: build-tiktin-pdf-a
+on:
+  push:
+    branches: [version-a]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build installer
+        run: bash build/build.sh
+      - name: Publish release (version A, not latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER=$(sed -n 1p VERSION)
+          gh release delete "v$VER" -y --cleanup-tag || true
+          gh release create "v$VER" out/TiktinPDF-Setup-A.exe --target version-a --title "Tiktin PDF $VER" --notes "Tiktin PDF $VER" --latest=false
