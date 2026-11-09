@@ -2,7 +2,7 @@
 # בניית קובץ ההתקנה של טיקטין PDF ל-Windows (רץ ב-GitHub Actions על Linux)
 set -euo pipefail
 ROOT="$(pwd)"
-VER="$(sed -n 1p VERSION)"; DATE="$(sed -n 2p VERSION)"
+VER="$(sed -n 1p VERSION)"; DATE="$(sed -n 2p VERSION)"; LETTER="${VER:0:1}"; VNUM="${VER:1}"
 sudo apt-get update -qq && sudo apt-get install -y -qq nsis >/dev/null
 python -m pip install -q pillow
 curl -sL -o mm https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-linux-64
@@ -14,10 +14,10 @@ python -m pip install -q --no-deps --only-binary=:all: --platform win_amd64 --py
 python build/trim.py "$ROOT/winpy"
 curl -sL -o logo.png https://raw.githubusercontent.com/tiktiny/tiktin-tools/main/tiktin-logo.png
 mkdir -p "$ROOT/winpy/app" "$ROOT/out"
-python build/make_assets.py logo.png "$VER" "$DATE" "$ROOT/winpy/app/version.py" "$ROOT/out/tiktin_pdf.ico"
+python build/make_assets.py logo.png "$VER" "$DATE" "$ROOT/winpy/app/version.py" "$ROOT/out/tiktin_pdf.ico" "$LETTER"
 cp src/*.py "$ROOT/winpy/app/"
 python -m compileall -q "$ROOT/winpy/app"
 cd build
-makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" launcher.nsi
-makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" installer.nsi
+makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVNUM="$VNUM" launcher.nsi
+makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVNUM="$VNUM" installer.nsi
 ls -la "$ROOT/out"

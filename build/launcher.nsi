@@ -1,10 +1,10 @@
 Unicode true
 SilentInstall silent
 RequestExecutionLevel user
-Name "Tiktin PDF"
-OutFile "${ROOT}/out/TiktinPDF.exe"
+Name "Tiktin PDF A"
+OutFile "${ROOT}/out/TiktinPDF-A.exe"
 Icon "${ROOT}/out/tiktin_pdf.ico"
-VIProductVersion "${VERSION}.0"
+VIProductVersion "${VNUM}.0"
 VIAddVersionKey "ProductName" "Tiktin PDF"
 VIAddVersionKey "FileDescription" "Tiktin PDF"
 VIAddVersionKey "FileVersion" "${VERSION}"
