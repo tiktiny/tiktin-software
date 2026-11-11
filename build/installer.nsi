@@ -5,6 +5,7 @@ OutFile "${ROOT}/out/TiktinPDF-Setup-A.exe"
 InstallDir "$LOCALAPPDATA\Programs\TiktinPDF-A"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
+SetCompressorDictSize 64
 Icon "${ROOT}/out/tiktin_pdf.ico"
 !define MUI_ICON "${ROOT}/out/tiktin_pdf.ico"
 !define MUI_UNICON "${ROOT}/out/tiktin_pdf.ico"
