@@ -357,7 +357,28 @@ def paint_stamp(p, it, cosmetic):
     p.save()
     p.setRenderHint(p.RenderHint.SmoothPixmapTransform, True)
     p.drawImage(r, img)
+    g = stamp_date_geom(it)
+    if g:
+        txt, cx, cy, h = g
+        path = A._text_path(txt)
+        br = path.boundingRect()
+        k = h / max(1.0, br.height())
+        p.translate(cx - br.center().x() * k, cy - br.center().y() * k)
+        p.scale(k, k)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(_color(it)))
+        p.drawPath(path)
     p.restore()
+
+
+def stamp_date_geom(it):
+    """התאריך שנכתב בשדה "תאריך" של החותמת: (טקסט, מרכז x, מרכז y, גובה) — במערכת של החותמת הלא מסובבת."""
+    d, pos = it.get("date"), it.get("datepos")
+    if not d or not pos:
+        return None
+    r = stamp_rect(it)
+    fx, fy, fh = pos
+    return d, r.left() + fx * r.width(), r.top() + fy * r.height(), fh * r.height()
 
 
 def bake_stamp(page, it, m):
@@ -372,6 +393,9 @@ def bake_stamp(page, it, m):
         rect = (rect * m).normalize()
     page.insert_image(rect, stream=data, rotate=page.rotation, keep_proportion=False,
                       overlay=True, oc=A.OC())
+    g = stamp_date_geom(it)
+    if g:
+        bake_text_path(page, m, g[0], g[1], g[2], g[3], 0.0, _color(it))
 
 
 def resize_stamp(it, orig, hh, pt):
@@ -557,6 +581,10 @@ def bake_rotated(page, it, m):
         if page.rotation:
             rect = (rect * m).normalize()
         page.insert_image(rect, stream=data, rotate=page.rotation, keep_proportion=False, overlay=True, oc=A.OC())
+        g = stamp_date_geom(it)
+        if g:
+            c = tr.map(QPointF(g[1], g[2]))
+            bake_text_path(page, m, g[0], c.x(), c.y(), g[3], it.get("angle", 0.0), col)
         return
     sh = page.new_shape()
     if t == "shape":

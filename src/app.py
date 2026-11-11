@@ -22,8 +22,6 @@ try:
     from version import ICON_B64
 except ImportError:
     ICON_B64 = None
-from printing import PrintDialog
-from hole_dialog import HoleDialog
 from text_dialog import HebrewKeyboard
 from inline_text import InlineText
 from colors import ColorButton
@@ -34,7 +32,6 @@ import stamps
 from scale_detect import analyzer_main
 from cliptray import ClipTray, TRAY_STYLE
 import marks_store
-from help import HelpDialog
 
 APP_NAME = "טיקטין PDF A"
 TILE = 512                 # גודל אריח בפיקסלים של המסך
@@ -68,18 +65,19 @@ class RenderPool(QObject):
     """מחלק עבודות רינדור לתהליכים מקבילים, תמיד לפי סדר העדיפות העדכני."""
     tile_ready = Signal(object, object, int, int)   # key, QPixmap, px, py
 
-    def __init__(self, n):
+    def __init__(self, n, autostart=True):
         super().__init__()
         self.procs, self.job_conns, res_conns = [], [], []
-        ctx = mp.get_context("spawn")
+        self._ctx = mp.get_context("spawn")
+        self._child_ends = []     # (jr, rw) של תהליכים שעוד לא הופעלו
         for i in range(n):
-            jr, jw = ctx.Pipe(duplex=False)
-            rr, rw = ctx.Pipe(duplex=False)
-            p = ctx.Process(target=worker_main, args=(jr, rw, i), daemon=True)
-            p.start()
-            self.procs.append(p)
+            jr, jw = self._ctx.Pipe(duplex=False)
+            rr, rw = self._ctx.Pipe(duplex=False)
+            self._child_ends.append((jr, rw))
             self.job_conns.append(jw)
             res_conns.append(rr)
+        self._started = 0
+        self._spawning = False
         self.idle = set()
         self.inflight = {}        # wid -> jobid
         self.jobs = {}            # jobid -> job
@@ -88,6 +86,23 @@ class RenderPool(QObject):
         self.listener = _Listener(res_conns)
         self.listener.got.connect(self._on_msg)
         self.listener.start()
+        if autostart:
+            self.start()
+
+    def start(self):
+        """עלייה מהירה: מפעילים תהליך רינדור אחד, ואת השאר רק כשהוא מוכן —
+        כך החלון עולה בלי שכל התהליכים יתחרו על הדיסק באותו רגע."""
+        if self._started == 0:
+            self._spawn(1)
+
+    def _spawn(self, upto):
+        while self._started < min(upto, len(self._child_ends)):
+            i = self._started
+            jr, rw = self._child_ends[i]
+            p = self._ctx.Process(target=worker_main, args=(jr, rw, i), daemon=True)
+            p.start()
+            self.procs.append(p)
+            self._started += 1
 
     @property
     def ready_count(self):
@@ -126,6 +141,11 @@ class RenderPool(QObject):
         if kind == "ready":
             self.idle.add(wid)
             self._dispatch()
+            if self._started < len(self._child_ends) and not self._spawning:
+                # הראשון מוכן — מפעילים את כל השאר ברקע, בלי לעצור את הממשק ואת הציור
+                self._spawning = True
+                import threading
+                threading.Thread(target=self._spawn, args=(len(self._child_ends),), daemon=True).start()
             return
         jid = msg[2]
         self.inflight.pop(wid, None)
@@ -149,6 +169,7 @@ class RenderPool(QObject):
 
     def shutdown(self):
         self.listener.running = False
+        self.listener.wait(700)
         for c in self.job_conns:
             try:
                 c.send(None)
@@ -294,6 +315,9 @@ class PdfView(QAbstractScrollArea):
         self.analyze_timer.timeout.connect(self._request_analysis)
         self.shape_start = None
         self.stamp_job = None
+        self.erase_rect = None       # (עמוד, מלבן) של מחיקת אזור שעוד לא אושרה
+        self._seg_cache = {}         # עמוד -> קטעי קווים לחיפוש "פריט בודד" (נבנה רק בשימוש)
+        self._erase_drag = None
         self._last_erase = None
         self.zoom_timer = QTimer(self, singleShot=True, interval=140)
         self.zoom_timer.timeout.connect(self._settle_zoom)
@@ -325,6 +349,8 @@ class PdfView(QAbstractScrollArea):
         self.dirty = False
         self.pages_changed = False
         self.selected = None
+        if src is None or src == path:
+            self._seg_cache = {}
         self._load_scales()
         self.auto_scales = {}
         self.scale_info = {}
@@ -687,6 +713,22 @@ class PdfView(QAbstractScrollArea):
             pen.setWidthF(1.5)
             p.setPen(pen)
             p.drawRect(sr)
+        if self.erase_rect:
+            ei, er = self.erase_rect
+            prr = self.page_rect(ei)
+            p.save()
+            p.translate(prr.x(), prr.y())
+            p.scale(self.zoom, self.zoom)
+            p.fillRect(er, QColor(200, 32, 47, 45))
+            p.setPen(A._pen("#c8202f", True, True, 1.6))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(er)
+            hs = 4.5 / self.zoom
+            p.setPen(A._pen("#c8202f", True, width=1.2))
+            p.setBrush(QColor("#ffffff"))
+            for loc, _ in self._erase_rect_handles():
+                p.drawRect(QRectF(loc.x() - hs, loc.y() - hs, 2 * hs, 2 * hs))
+            p.restore()
         b = self.scale_badge(self._cur_page)
         if b:
             p.resetTransform()
@@ -889,6 +931,8 @@ class PdfView(QAbstractScrollArea):
         self.ghost = None
         self.dim_start = None
         self.shape_start = None
+        self.erase_rect = None
+        self._erase_drag = None
         self.calib = None
         if tool != "pan":
             self.selected = None
@@ -949,8 +993,10 @@ class PdfView(QAbstractScrollArea):
         return ("pages", self.src, self.pw, self._snapshot(), dict(self.scales), dict(self.auto_scales),
                 self.pages_changed)
 
-    def _reload_src(self, src, pw):
+    def _reload_src(self, src, pw, keep_view=False):
         undo, redo, path = self.undo, self.redo, self.path
+        view = (self.zoom, self.horizontalScrollBar().value(), self.verticalScrollBar().value(),
+                self.tool, dict(self.template or {})) if keep_view else None
         doc = pymupdf.open(src)
         if doc.needs_pass:
             doc.authenticate(pw or "")
@@ -963,17 +1009,201 @@ class PdfView(QAbstractScrollArea):
             except Exception:
                 pass
         self.undo, self.redo = undo, redo
+        if view:
+            z, hx, vy, tool, tpl = view
+            self.set_zoom(z)
+            self.horizontalScrollBar().setValue(hx)
+            self.verticalScrollBar().setValue(vy)
+            if tool.startswith("erase_"):
+                self.set_tool(tool, tpl)
         return cur
 
     def _restore_page_state(self, st):
         _, src, pw, items, scales, auto, changed = st
-        cur = self._reload_src(src, pw)
+        self._seg_cache = {}
+        cur = self._reload_src(src, pw, keep_view=True)
         self.items, self.scales, self.auto_scales = items, scales, auto
         self.pages_changed = changed
         self.dirty = True
         self.changed.emit()
         self.go_page(min(cur, len(self.sizes) - 1))
         self.viewport().update()
+
+    # ----- מחיקה מהשרטוט המקורי (ניתנת לביטול עד השמירה)
+    def _edit_src(self, i, fn):
+        """מריץ שינוי על עמוד i בעותק של הקובץ, וטוען אותו במקום — בלי לשנות את התצוגה."""
+        import tempfile
+        import uuid
+        st = self._page_state()
+        doc2 = pymupdf.open(self.src)
+        if doc2.needs_pass:
+            doc2.authenticate(self.pw or "")
+        marks_store.strip_page(doc2, doc2[i])      # סימונים צרובים ייצרבו שוב בשמירה
+        result = fn(doc2[i])
+        if not result:
+            doc2.close()
+            return result
+        d = os.path.join(tempfile.gettempdir(), "TiktinPDF-work")
+        os.makedirs(d, exist_ok=True)
+        tmp = os.path.join(d, uuid.uuid4().hex + ".pdf")
+        doc2.save(tmp)
+        doc2.close()
+        items, scales, auto = self._snapshot(), dict(self.scales), dict(self.auto_scales)
+        self._reload_src(tmp, None, keep_view=True)
+        self.undo.append(st)
+        del self.undo[:-50]
+        self.redo = []
+        self.items, self.scales, self.auto_scales = items, scales, auto
+        self.pages_changed = True
+        self.dirty = True
+        self.changed.emit()
+        self.viewport().update()
+        return result
+
+    def _segments(self, i):
+        """קטעי הקווים של עמוד (במערכת העמוד הלא מסובבת), עם רשת חיפוש מהירה. נבנה פעם אחת לעמוד."""
+        cache = self._seg_cache.get(i)
+        if cache is None:
+            page = self.doc[i]
+            grid, cell = {}, 40.0
+            segs = []
+            try:
+                paths = page.get_cdrawings()
+            except Exception:
+                paths = []
+            for pth in paths:
+                if pth.get("type") == "f":            # מילוי בלבד (לא קו)
+                    continue
+                w = pth.get("width") or 0.5
+                for itm in pth.get("items", ()):
+                    k = itm[0]
+                    if k == "l":
+                        pieces = [(itm[1], itm[2])]
+                    elif k == "re":
+                        x0, y0, x1, y1 = itm[1]
+                        pieces = [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))]
+                    elif k == "qu":
+                        q = itm[1]
+                        pts = [q[0], q[1], q[3], q[2]] if len(q) == 4 else list(q)
+                        pieces = [(pts[n], pts[(n + 1) % 4]) for n in range(4)]
+                    elif k == "c":
+                        pieces = [(itm[1], itm[2]), (itm[2], itm[3]), (itm[3], itm[4])]
+                    else:
+                        continue
+                    for a_, b_ in pieces:
+                        sid = len(segs)
+                        segs.append((a_[0], a_[1], b_[0], b_[1], w, k, itm if k == "c" else None))
+                        gx0, gx1 = int(min(a_[0], b_[0]) // cell), int(max(a_[0], b_[0]) // cell)
+                        gy0, gy1 = int(min(a_[1], b_[1]) // cell), int(max(a_[1], b_[1]) // cell)
+                        if (gx1 - gx0 + 1) * (gy1 - gy0 + 1) > 400:   # קו ארוך מאוד: רק בתאים שלאורכו
+                            n = max(gx1 - gx0, gy1 - gy0) + 1
+                            for t in range(n + 1):
+                                x = a_[0] + (b_[0] - a_[0]) * t / n
+                                y = a_[1] + (b_[1] - a_[1]) * t / n
+                                grid.setdefault((int(x // cell), int(y // cell)), []).append(sid)
+                        else:
+                            for gx in range(gx0, gx1 + 1):
+                                for gy in range(gy0, gy1 + 1):
+                                    grid.setdefault((gx, gy), []).append(sid)
+            cache = {"segs": segs, "grid": grid, "cell": cell, "erased": set()}
+            self._seg_cache[i] = cache
+        return cache
+
+    def erase_src_item(self, i, pt):
+        """מוחק מהשרטוט המקורי פריט בודד מתחת לעכבר: מילה (מחיקה אמיתית), או קטע קו (מכוסה בלבן)."""
+        tol = max(1.0, 6.0 / self.zoom)
+        page0 = self.doc[i]
+        q = pymupdf.Point(pt.x(), pt.y()) * page0.derotation_matrix
+        word = None
+        for w in page0.get_text("words"):
+            if pymupdf.Rect(w[:4]).contains(q):
+                word = w
+                break
+        if word:
+            def fn_word(page):
+                page.add_redact_annot(pymupdf.Rect(word[:4]))
+                page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
+                                      graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+                                      text=pymupdf.PDF_REDACT_TEXT_REMOVE)
+                return f"המילה \"{word[4]}\""
+            return self._edit_src(i, fn_word)
+        cache = self._segments(i)
+        cell = cache["cell"]
+        best = None
+        for gx in range(int((q.x - tol) // cell), int((q.x + tol) // cell) + 1):
+            for gy in range(int((q.y - tol) // cell), int((q.y + tol) // cell) + 1):
+                for sid in cache["grid"].get((gx, gy), ()):
+                    if sid in cache["erased"]:
+                        continue
+                    x1, y1, x2, y2, w, k, c = cache["segs"][sid]
+                    d = A._seg_dist(q.x, q.y, x1, y1, x2, y2) - w / 2
+                    if d <= tol and (best is None or d < best[0]):
+                        best = (d, sid)
+        if best is None:
+            return ""
+        sid = best[1]
+        x1, y1, x2, y2, w, k, c = cache["segs"][sid]
+
+        def fn_seg(page):
+            sh = page.new_shape()
+            if k == "c" and c is not None:
+                sh.draw_bezier(c[1], c[2], c[3], c[4])
+            else:
+                sh.draw_line((x1, y1), (x2, y2))
+            sh.finish(color=(1, 1, 1), width=w + 0.8, lineCap=0, closePath=False)
+            sh.commit()
+            return "הקו שנבחר"
+        res = self._edit_src(i, fn_seg)
+        if res:
+            cache["erased"].add(sid)
+        return res
+
+    def erase_src_rect(self, i, rect):
+        """מוחק מהשרטוט המקורי את כל מה שבתוך המלבן (קווים, טקסט, ובסריקה — הפיקסלים)."""
+        def fn(page):
+            m = page.derotation_matrix
+            r = (pymupdf.Rect(rect.left(), rect.top(), rect.right(), rect.bottom()) * m).normalize()
+            page.add_redact_annot(r, fill=(1, 1, 1))
+            page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_PIXELS,
+                                  graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
+                                  text=pymupdf.PDF_REDACT_TEXT_REMOVE)
+            return "האזור שסומן"
+        return self._edit_src(i, fn)
+
+    def _erase_rect_handles(self):
+        if not self.erase_rect:
+            return []
+        i, r = self.erase_rect
+        return [(QPointF(r.left(), r.top()), (-1, -1)), (QPointF(r.right(), r.top()), (1, -1)),
+                (QPointF(r.left(), r.bottom()), (-1, 1)), (QPointF(r.right(), r.bottom()), (1, 1))]
+
+    def _erase_rect_hit(self, pos):
+        """איזה חלק של המלבן מתחת לעכבר: ידית פינה, גוף המלבן, או כלום."""
+        if not self.erase_rect:
+            return None
+        i, r = self.erase_rect
+        _, pt = self.to_page(pos, page=i)
+        tol = 7.0 / self.zoom
+        for loc, hh in self._erase_rect_handles():
+            if abs(loc.x() - pt.x()) <= tol and abs(loc.y() - pt.y()) <= tol:
+                return ("h", hh)
+        if r.contains(pt):
+            return ("in", None)
+        return None
+
+    def apply_erase_rect(self):
+        if not self.erase_rect:
+            return
+        i, r = self.erase_rect
+        if r.width() * self.zoom < 3 or r.height() * self.zoom < 3:
+            return
+        self.erase_rect = None
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            what = self.erase_src_rect(i, r)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.status.emit(f"נמחק מהשרטוט: {what}. UNDO מחזיר; הקובץ עצמו משתנה רק ב\"שמירת שינויים\"")
 
     def delete_pages(self, pages):
         """מוחק עמודים (אינדקסים מ-0). הקובץ המקורי לא משתנה עד "שמירת שינויים"."""
@@ -995,6 +1225,7 @@ class PdfView(QAbstractScrollArea):
         doc2.save(tmp, garbage=1)
         doc2.close()
         gone = set(pages)
+        self._seg_cache = {}
 
         def newidx(i):
             return i - sum(1 for p in pages if p < i)
@@ -1109,6 +1340,7 @@ class PdfView(QAbstractScrollArea):
                     plan[i] = {90: 90, 180: 180, 270: -90}[r % 360]
         if not plan:
             return 0
+        self._seg_cache = {}
         st = self._page_state()
         doc2 = pymupdf.open(self.src)
         if doc2.needs_pass:
@@ -1310,6 +1542,7 @@ class PdfView(QAbstractScrollArea):
             return
         if it["type"] != "hole":
             return
+        from hole_dialog import HoleDialog
         dlg = HoleDialog(self, it["kind"], it)
         if dlg.exec() == QDialog.Accepted:
             self._push_undo()
@@ -1476,6 +1709,28 @@ class PdfView(QAbstractScrollArea):
                  "color": self.pen_color, "size": self.text_size})
             self.start_text_edit(i, len(self.items[i]) - 1, undo=False)
             return
+        if ev.button() == Qt.LeftButton and self.tool == "erase_item":
+            i, pt = self.to_page(ev.position())
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                what = self.erase_src_item(i, pt)
+            finally:
+                QApplication.restoreOverrideCursor()
+            self.status.emit(f"נמחק מהשרטוט: {what}. UNDO מחזיר" if what else
+                             "לא נמצא פריט בנקודה הזו — מקליקים בדיוק על קו או על מילה")
+            return
+        if ev.button() == Qt.LeftButton and self.tool == "erase_rect":
+            hit = self._erase_rect_hit(ev.position())
+            if hit:
+                i, r = self.erase_rect
+                _, pt = self.to_page(ev.position(), page=i)
+                self._erase_drag = (hit, pt, QRectF(r))
+                return
+            i, pt = self.to_page(ev.position())
+            self.erase_rect = (i, QRectF(pt, pt))
+            self._erase_drag = (("h", (1, 1)), pt, QRectF(pt, pt))
+            self.viewport().update()
+            return
         if ev.button() == Qt.LeftButton and self.tool == "shape":
             i, pt = self.to_page(ev.position(), page=self.shape_start[0] if self.shape_start else None)
             if self.shape_start is None:
@@ -1569,6 +1824,25 @@ class PdfView(QAbstractScrollArea):
             ev.accept()
 
     def mouseMoveEvent(self, ev):
+        if self.tool == "erase_rect" and self._erase_drag and self.erase_rect:
+            (kind, hh), p0, r0 = self._erase_drag
+            i, _ = self.erase_rect
+            _, pt = self.to_page(ev.position(), page=i)
+            if kind == "in":
+                self.erase_rect = (i, r0.translated(pt.x() - p0.x(), pt.y() - p0.y()))
+            else:
+                sx, sy = hh
+                fx = r0.left() if sx > 0 else r0.right()
+                fy = r0.top() if sy > 0 else r0.bottom()
+                self.erase_rect = (i, QRectF(QPointF(fx, fy), pt).normalized())
+            self.viewport().update()
+            return
+        if self.tool == "erase_rect" and self.erase_rect:
+            h = self._erase_rect_hit(ev.position())
+            if h and h[0] == "h":
+                self.viewport().setCursor(Qt.SizeFDiagCursor if h[1][0] * h[1][1] > 0 else Qt.SizeBDiagCursor)
+            else:
+                self.viewport().setCursor(Qt.SizeAllCursor if h else Qt.CrossCursor)
         if self.select_mode:
             if self._sel:
                 self._sel = (self._sel[0], self._content_pt(ev.position()))
@@ -1612,7 +1886,9 @@ class PdfView(QAbstractScrollArea):
             elif orig["type"] in EXTRA:
                 EXTRA[orig["type"]]["resize"](self.items[i][idx], orig, hh, pt)
                 if orig["type"] == "stamp":
-                    QSettings("Tiktin", "TiktinPDF").setValue("stamp_w", self.items[i][idx]["w"])
+                    sl = self.items[i][idx].get("slot")
+                    QSettings("Tiktin", "TiktinPDF").setValue(
+                        f"stamp_w{sl}" if isinstance(sl, int) else "stamp_w", self.items[i][idx]["w"])
                 elif orig["type"] == "mark":
                     QSettings("Tiktin", "TiktinPDF").setValue("mark_s", self.items[i][idx]["s"])
             elif orig["type"] == "text":
@@ -1684,6 +1960,19 @@ class PdfView(QAbstractScrollArea):
                                           (Qt.OpenHandCursor if self.tool == "pan" else Qt.IBeamCursor))
 
     def mouseReleaseEvent(self, ev):
+        if self.tool == "erase_rect" and self._erase_drag:
+            self._erase_drag = None
+            if self.erase_rect:
+                i, r = self.erase_rect
+                r = r.normalized()
+                if r.width() * self.zoom < 4 or r.height() * self.zoom < 4:
+                    self.erase_rect = None
+                else:
+                    self.erase_rect = (i, r)
+                    self.status.emit("אפשר לגרור את הפינות או להזיז את המלבן. Enter / Delete / לחיצה כפולה = מחיקה, "
+                                     "Esc = ביטול")
+            self.viewport().update()
+            return
         if self.select_mode and self._sel and ev.button() == Qt.LeftButton:
             a, b = self._sel
             sr = QRectF(a, b).normalized()
@@ -1713,6 +2002,9 @@ class PdfView(QAbstractScrollArea):
 
     def mouseDoubleClickEvent(self, ev):
         if not self.sizes or ev.button() != Qt.LeftButton:
+            return
+        if self.tool == "erase_rect" and self.erase_rect and self._erase_rect_hit(ev.position()):
+            self.apply_erase_rect()
             return
         if self.tool in ("pan", "text"):
             h = self._hit_item(ev.position())
@@ -1744,6 +2036,11 @@ class PdfView(QAbstractScrollArea):
             self.cancel_select()
             self.window().statusBar().clearMessage()
             self.select_cancelled.emit()
+        elif self.tool == "erase_rect" and self.erase_rect and k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Delete):
+            self.apply_erase_rect()
+        elif k == Qt.Key_Escape and self.tool == "erase_rect" and self.erase_rect:
+            self.erase_rect = None
+            self.viewport().update()
         elif k == Qt.Key_Escape and self.tool != "pan":
             if self.dim_start or self.shape_start:
                 self.dim_start = None
@@ -1789,7 +2086,7 @@ class MainWindow(QMainWindow):
     def __init__(self, pool):
         super().__init__()
         self.settings = QSettings("Tiktin", "TiktinPDF")
-        self.setWindowTitle(APP_NAME)
+        self.setWindowTitle(f"{APP_NAME}   |   גרסה {VERSION} ({BUILD_DATE})")
         self.setAcceptDrops(True)
         self.view = PdfView(pool)
         self.setCentralWidget(self.view)
@@ -1874,7 +2171,7 @@ class MainWindow(QMainWindow):
         logo = QLabel()
         pm = QPixmap()
         pm.loadFromData(base64.b64decode(LOGO_B64))
-        logo.setPixmap(pm.scaledToHeight(30, Qt.SmoothTransformation))
+        logo.setPixmap(pm.scaledToHeight(27, Qt.SmoothTransformation))
         logo.setContentsMargins(4, 0, 8, 0)
         tb.addWidget(logo)
         tb.addWidget(self._btn("פתיחה", "פתיחת קובץ PDF (Ctrl+O)", self.open_dialog, primary=True))
@@ -1936,11 +2233,24 @@ class MainWindow(QMainWindow):
         am.addSeparator()
         sm = am.addMenu("חותמות")
         self.stamp_menu = sm
-        sm.aboutToShow.connect(self._fill_stamp_menu)
+        # התפריט נבנה מראש ומתעדכן רק אחרי הוספה או הסרה של חותמת —
+        # בנייה מחדש בזמן שהתפריט נפתח משאירה ב-Windows תפריט ריק
+        self._fill_stamp_menu()
         self.add_btn = self._menu_btn("הוסף", "הוספה לשרטוט: חורים, תחנת שנאים, קווים, חצים, צורות, סימנים, "
                                               "טקסט, עט וחותמות", am, checkable=True)
         tb.addWidget(self.add_btn)
         self.add_btn.installEventFilter(self)
+
+        # ----- מחיקה מהשרטוט המקורי
+        em = self._menu(self)
+        self._act(em, "פריט בודד (קו או מילה)", lambda: self._erase_mode("erase_item"),
+                  "מקליקים על קו או על מילה בשרטוט — הם נמחקים מהקובץ המקורי. אפשר כמה ברצף")
+        self._act(em, "מלבן (אזור)", lambda: self._erase_mode("erase_rect"),
+                  "גוררים מלבן, מכוונים את גודלו בפינות, ו-Enter מוחק את כל מה שבתוכו")
+        self.erase_btn = self._menu_btn("מחיקה מהשרטוט", "מחיקת קווים, טקסט או אזור מהשרטוט המקורי עצמו "
+                                                         "(לא רק מהסימונים). UNDO מחזיר", em, checkable=True)
+        self.erase_btn.installEventFilter(self)
+        tb.addWidget(self.erase_btn)
 
         # ----- מדידה
         mm2 = self._menu(self)
@@ -1959,6 +2269,8 @@ class MainWindow(QMainWindow):
         mb.setPopupMode(QToolButton.MenuButtonPopup)
         mb.setMenu(mm2)
         mb.clicked.connect(self._measure_toggle)
+        # רוחב מספיק כדי שהמילה "מדידה" תיראה במלואה גם ליד החץ של התפריט (גם בגופן ובהגדלה של Windows)
+        mb.setMinimumWidth(max(100, mb.fontMetrics().horizontalAdvance("מדידה") * 2 + 34))
         self.measure_btn = mb
         tb.addWidget(self.measure_btn)
         self.scale_box = QComboBox()
@@ -1969,8 +2281,12 @@ class MainWindow(QMainWindow):
         self.scale_box.lineEdit().setAlignment(Qt.AlignCenter)
         self.scale_box.setToolTip("קנה המידה של העמוד הנוכחי — מזוהה ומאומת אוטומטית. אפשר לבחור או להקליד, למשל 1:50")
         self.scale_box.textActivated.connect(self._scale_text)
-        tb.addWidget(self.scale_box)
-        tb.addSeparator()
+        # הקנ"מ עבר לתפריט "מדידה" (והוא מוצג בפינת השרטוט) — כדי שהסרגל ייכנס בשורה אחת
+        scm = mm2.addMenu("קנה מידה לעמוד")
+        for t_ in ("1:20", "1:25", "1:50", "1:75", "1:100", "1:200", "1:250", "1:500"):
+            self._act(scm, t_, lambda t_=t_: self._scale_text(t_))
+        scm.addSeparator()
+        self._act(scm, "קנ\"מ אחר...", self._scale_other)
 
         # ----- עריכה וצבע
         for arrow, word, tip, fn in (("↶", "UNDO", "ביטול הפעולה האחרונה (Ctrl+Z)", self.view.do_undo),
@@ -1980,7 +2296,7 @@ class MainWindow(QMainWindow):
             b.setToolTip(tip)
             b.setText(word)
             b.setIcon(self._glyph_icon(arrow))
-            b.setIconSize(QSize(16, 16))
+            b.setIconSize(QSize(14, 14))
             b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             b.setLayoutDirection(Qt.LeftToRight)
             b.clicked.connect(fn)
@@ -2046,7 +2362,7 @@ class MainWindow(QMainWindow):
         self.zoom_box.setEditable(True)
         self.zoom_box.setInsertPolicy(QComboBox.NoInsert)
         self.zoom_box.addItems(["25%", "50%", "75%", "100%", "150%", "200%", "400%", "800%", "1600%"])
-        self.zoom_box.setFixedWidth(66)
+        self.zoom_box.setFixedWidth(60)
         self.zoom_box.setToolTip("אחוז זום — בחרו או הקלידו")
         self.zoom_box.lineEdit().setAlignment(Qt.AlignCenter)
         self.zoom_box.textActivated.connect(self._zoom_text)
@@ -2108,6 +2424,7 @@ class MainWindow(QMainWindow):
             return
         v = self.view
         v.scale_of(max(0, v._cur_page))
+        from hole_dialog import HoleDialog
         dlg = HoleDialog(self, kind, shape=shape)
         if dlg.exec() != QDialog.Accepted:
             v.set_tool("pan")
@@ -2142,50 +2459,87 @@ class MainWindow(QMainWindow):
         self.view.setFocus()
 
     def _fill_stamp_menu(self):
+        """תפריט החותמות: 2 קבועות + עד 2 נוספות. כל חותמת נפתחת לתפריט צבע ומיקום (בלי חלונות בחירה)."""
         sm = self.stamp_menu
+        for a_ in sm.actions():
+            if a_.menu():
+                a_.menu().deleteLater()
         sm.clear()
-        for slot in (1, 2):
-            if stamps.has(slot):
-                self._act(sm, f"חותמת {slot}", lambda s_=slot: self._add_stamp(s_),
-                          "בוחרים צבע ואם לשים בעמוד הנוכחי או בכל העמודים")
-            else:
-                self._act(sm, f"חותמת {slot} — טעינת תמונה...", lambda s_=slot: self._load_stamp(s_, True),
-                          "בוחרים תמונה של החותמת (PNG או JPG). נשמרת לפעמים הבאות")
+        for slot in stamps.FIXED + stamps.CUSTOM:
+            if not stamps.has(slot):
+                continue
+            title = stamps.name(slot) + ("  (עם תאריך)" if stamps.date_pos(slot) else "")
+            m = QMenu(title, sm)
+            m.setLayoutDirection(Qt.RightToLeft)
+            m.menuAction().setText(title)
+            m.menuAction().setToolTip(title)
+            sm.addMenu(m)
+            for color, cname in (("#d0021b", "אדום"), ("#000000", "שחור")):
+                for where, wname in (("page", "בעמוד הנוכחי"), ("all", "בכל העמודים")):
+                    self._act(m, f"{cname} – {wname}",
+                              lambda s_=slot, c_=color, w_=where: self._add_stamp(s_, c_, w_),
+                              "מקליקים על השרטוט במקום החותמת" + (
+                                  ". בשאר העמודים היא תונח במקום פנוי מטקסט, קרוב לאותו מקום" if where == "all" else ""))
+            if slot in stamps.CUSTOM:
+                m.addSeparator()
+                self._act(m, "הסרת החותמת", lambda s_=slot: self._remove_stamp(s_))
         sm.addSeparator()
-        for slot in (1, 2):
-            if stamps.has(slot):
-                self._act(sm, f"החלפת התמונה של חותמת {slot}...", lambda s_=slot: self._load_stamp(s_, False))
+        a = self._act(sm, "הוספת חותמת נוספת...", self._new_stamp,
+                      "מתמונה (PNG/JPG) או מקובץ PDF, עם שם שנשמר עד שמסירים אותה. עד 2 חותמות נוספות")
+        a.setEnabled(stamps.free_custom_slot() is not None)
 
-    def _load_stamp(self, slot, then_add):
+    def _new_stamp(self):
+        slot = stamps.free_custom_slot()
+        if slot is None:
+            QMessageBox.information(self, APP_NAME, "כבר יש 2 חותמות נוספות. כדי להוסיף, קודם מסירים אחת מהן.")
+            return
         d = self.settings.value("stamp_dir", self.settings.value("last_dir", ""))
-        path, _ = QFileDialog.getOpenFileName(self, f"תמונה לחותמת {slot}", d,
-                                              "תמונות (*.png *.jpg *.jpeg *.bmp *.gif)")
+        path, _ = QFileDialog.getOpenFileName(self, "קובץ החותמת", d,
+                                              "תמונה או PDF (*.png *.jpg *.jpeg *.bmp *.gif *.pdf)")
         if not path:
             return
         self.settings.setValue("stamp_dir", os.path.dirname(path))
+        base = os.path.splitext(os.path.basename(path))[0]
+        nm, ok = QInputDialog.getText(self, "שם החותמת", "שם החותמת (יישמר עד שמסירים אותה):",
+                                      QLineEdit.Normal, base)
+        if not ok:
+            return
+        nm = nm.strip() or base
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            ok = stamps.load_file(slot, path)
+            ok = stamps.load_file(slot, path, nm)
+        except Exception:
+            ok = False
         finally:
             QApplication.restoreOverrideCursor()
         if not ok:
-            QMessageBox.warning(self, APP_NAME, "לא נמצא דיו בתמונה. בחרו תמונה של החותמת על רקע לבן או שקוף.")
+            QMessageBox.warning(self, APP_NAME, "לא נמצאה חותמת בקובץ. בוחרים תמונה או PDF של החותמת על רקע לבן או שקוף.")
             return
-        self.view.viewport().update()
-        self.statusBar().showMessage(f"חותמת {slot} נשמרה", 5000)
-        if then_add:
-            self._add_stamp(slot)
+        self._fill_stamp_menu()
+        self.statusBar().showMessage(f"החותמת \"{nm}\" נוספה לתפריט החותמות", 6000)
 
-    def _add_stamp(self, slot):
+    def _remove_stamp(self, slot):
+        nm = stamps.name(slot)
+        if QMessageBox.question(self, APP_NAME, f"להסיר את החותמת \"{nm}\" מהתפריט?\n"
+                                "חותמות שכבר הונחו על שרטוטים לא נמחקות.") != QMessageBox.Yes:
+            return
+        stamps.remove(slot)
+        self._fill_stamp_menu()
+        self.statusBar().showMessage(f"החותמת \"{nm}\" הוסרה", 5000)
+
+    def _add_stamp(self, slot, color, where):
         if not self._need_doc():
             return
         v = self.view
-        dlg = stamps.StampDialog(self, slot, v.pen_color, len(v.sizes))
-        if dlg.exec() != QDialog.Accepted:
-            return
-        w = self.settings.value("stamp_w", 40.0, type=float)
-        v.set_tool("stamp", {"slot": slot, "w": w, "ar": stamps.aspect(slot), "color": dlg.color})
-        v.stamp_job = dlg.where
+        w = self.settings.value(f"stamp_w{slot}", 60.0 if slot == 2 else 40.0, type=float)
+        tpl = {"slot": slot, "w": w, "ar": stamps.aspect(slot), "color": color}
+        dp = stamps.date_pos(slot)
+        if dp:
+            from datetime import date
+            tpl["date"] = date.today().strftime("%d/%m/%Y")
+            tpl["datepos"] = list(dp)
+        v.set_tool("stamp", tpl)
+        v.stamp_job = where
         self.statusBar().showMessage("מקליקים על השרטוט במקום החותמת. Esc מבטל")
         v.setFocus()
 
@@ -2206,12 +2560,23 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, ev):
         # כשכלי הוספה פעיל, לחיצה על "הוסף" מפסיקה אותו (במקום לפתוח שוב את התפריט)
-        if obj is getattr(self, "add_btn", None) and ev.type() == QEvent.MouseButtonPress \
-                and self.view.tool in self.ADD_TOOLS:
+        if ev.type() == QEvent.MouseButtonPress and (
+                (obj is getattr(self, "add_btn", None) and self.view.tool in self.ADD_TOOLS) or
+                (obj is getattr(self, "erase_btn", None) and self.view.tool in ("erase_item", "erase_rect"))):
             self.view.set_tool("pan")
             self.statusBar().clearMessage()
             return True
         return super().eventFilter(obj, ev)
+
+    def _erase_mode(self, tool):
+        if not self._need_doc():
+            return
+        self.view.set_tool(tool)
+        if tool == "erase_item":
+            self.statusBar().showMessage("מחיקה מהשרטוט: מקליקים על קו או על מילה. Esc או לחיצה על הכפתור מסיימים")
+        else:
+            self.statusBar().showMessage("מחיקה מהשרטוט: גוררים מלבן סביב מה שרוצים למחוק. Esc או לחיצה על הכפתור מסיימים")
+        self.view.setFocus()
 
     def _copy_clicked(self):
         v = self.view
@@ -2244,7 +2609,8 @@ class MainWindow(QMainWindow):
         for b, on in ((getattr(self, "copy_btn", None), v.select_mode and v.select_purpose == "copy"),
                       (getattr(self, "print_btn", None), v.select_mode and v.select_purpose == "print"),
                       (getattr(self, "add_btn", None), v.tool in self.ADD_TOOLS),
-                      (getattr(self, "measure_btn", None), v.tool in ("dim", "calib"))):
+                      (getattr(self, "measure_btn", None), v.tool in ("dim", "calib")),
+                      (getattr(self, "erase_btn", None), v.tool in ("erase_item", "erase_rect"))):
             if b is None:
                 continue
             if b.isChecked() != bool(on):
@@ -2261,6 +2627,7 @@ class MainWindow(QMainWindow):
             self._help.raise_()
             self._help.activateWindow()
             return
+        from help import HelpDialog
         self._help = HelpDialog(self, f"גרסה {VERSION} | {BUILD_DATE}")
         self._help.destroyed.connect(lambda *_: setattr(self, "_help", None))
         self._help.show()
@@ -2438,13 +2805,22 @@ class MainWindow(QMainWindow):
 
     def _on_changed(self):
         name = os.path.basename(self.view.path or "")
-        self.setWindowTitle(f"{'* ' if self.view.dirty else ''}{name} – {APP_NAME}")
+        self.setWindowTitle(f"{'* ' if self.view.dirty else ''}{name} – {APP_NAME}   |   גרסה {VERSION} ({BUILD_DATE})")
 
     def _show_scale(self, *_):
         v = self.view
         if v.sizes:
             S = v.shown_scale(max(0, v._cur_page))
             self.scale_box.setEditText(f"1:{S:.4g}")
+
+    def _scale_other(self):
+        if not self._need_doc():
+            return
+        v = self.view
+        t, ok = QInputDialog.getText(self, "קנה מידה", "קנה מידה לעמוד הנוכחי (למשל 1:50):", QLineEdit.Normal,
+                                     f"1:{v.shown_scale(max(0, v._cur_page)):.4g}")
+        if ok and t.strip():
+            self._scale_text(t.strip())
 
     def _scale_text(self, t):
         v = self.view
@@ -2679,6 +3055,7 @@ class MainWindow(QMainWindow):
         # חלון לא-מודאלי: כך אפשר להסתיר אותו זמנית לבחירת חלון על השרטוט
         if getattr(self, "_pdlg", None) is not None:
             self._pdlg.close()
+        from printing import PrintDialog      # נטען רק בהדפסה הראשונה (חוסך זמן בעלייה)
         self._pdlg = PrintDialog(self)
         self._pdlg.setAttribute(Qt.WA_DeleteOnClose, True)
         self._pdlg.finished.connect(lambda *_: setattr(self, "_pdlg", None))
@@ -2762,15 +3139,15 @@ STYLE = f"""
 QMainWindow {{ background: #ffffff; }}
 QToolBar {{ background: #ffffff; border: none; border-bottom: 1px solid #d4d8de; padding: 4px 3px; spacing: 3px; }}
 QToolButton#tb {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
-                  padding: 0 6px; min-height: 30px; max-height: 30px; font-size: 10pt; }}
+                  padding: 0 5px; min-height: 30px; max-height: 30px; font-size: 9.5pt; }}
 QToolButton#tb::menu-indicator {{ image: none; width: 0; }}
 QToolButton#tbsplit {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
-                      padding: 0 22px 0 8px; min-height: 30px; max-height: 30px; font-size: 10pt; }}
+                      padding: 0 24px 0 24px; min-height: 30px; max-height: 30px; font-size: 9.5pt; }}
 QToolButton#tbsplit:hover {{ background: #f2f4f7; }}
 QToolButton#tbsplit:checked {{ background: {ACCENT}; border-color: {ACCENT}; color: #ffffff; font-weight: 600; }}
 QToolButton#tbsplit::menu-button {{ border: none; border-right: 1px solid #cfd4db; width: 16px; }}
 QToolButton#tbur {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
-                    padding: 0 4px; min-height: 30px; max-height: 30px; font-size: 7.5pt; }}
+                    padding: 0 3px; min-height: 30px; max-height: 30px; font-size: 7pt; }}
 QToolButton#tbur:hover {{ background: #f2f4f7; }}
 QToolButton#tb:hover {{ background: #f2f4f7; }}
 QToolButton#tb:checked {{ background: {ACCENT}; border-color: {ACCENT}; color: #ffffff; font-weight: 600; }}
@@ -2857,14 +3234,17 @@ def main():
         app.setWindowIcon(QIcon(ipm))
     else:
         app.setWindowIcon(QIcon(pm.copy(179, 12, 75, 86)))
-    _clean_temp()
     n = max(2, min(6, (os.cpu_count() or 4) - 1))
-    pool = RenderPool(n)
+    # תהליך רינדור אחד מתחיל לעלות כבר עכשיו, במקביל לבניית החלון, כדי שקובץ שנפתח בלחיצה כפולה
+    # יוצג מיד; שאר התהליכים עולים רק אחרי שהוא מוכן, והחלון לא מחכה לאף אחד מהם
+    pool = RenderPool(n, autostart=False)
+    pool.start()
     win = MainWindow(pool)
     win.show()
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     if args:
         QTimer.singleShot(0, lambda: win.open_path(args[0]))
+    QTimer.singleShot(3000, _clean_temp)
     rc = app.exec()
     pool.shutdown()
     win.view.analyzer.shutdown()

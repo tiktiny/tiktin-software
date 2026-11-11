@@ -6,8 +6,8 @@ import pymupdf
 from PySide6.QtCore import Qt, QSettings, QRectF, QMarginsF, QTimer, QEventLoop, QPointF
 from PySide6.QtGui import QImage, QPainter, QPageSize, QPageLayout, QFont, QColor, QPen, QPixmap
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-                               QButtonGroup, QComboBox, QSpinBox, QProgressDialog, QMessageBox,
-                               QApplication, QWidget, QSizePolicy)
+                               QComboBox, QSpinBox, QProgressDialog, QMessageBox,
+                               QApplication, QSizePolicy)
 from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
 
 RANGES = [("all", "כל הקובץ"), ("page", "עמוד נוכחי"), ("screen", "מסך נוכחי"), ("window", "בחירת חלון")]
@@ -104,29 +104,19 @@ class PrintDialog(QDialog):
         lay.addLayout(row1)
 
         def seg(title, items, saved, tips=None):
+            # תפריט נפתח (לא כרטיסיות)
             row1.addWidget(QLabel(title))
-            box = QWidget()
-            h = QHBoxLayout(box)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(0)
-            grp = QButtonGroup(self)
-            for k, (key, text) in enumerate(items):
-                b = QPushButton(text)
-                b.setCheckable(True)
-                b.setObjectName("seg")
-                b.setProperty("key", key)
-                b.setMinimumWidth(84)
-                if tips:
-                    b.setToolTip(tips.get(key, ""))
-                grp.addButton(b, k)
-                h.addWidget(b)
-                if key == saved:
-                    b.setChecked(True)
-            if grp.checkedButton() is None:
-                grp.button(0).setChecked(True)
+            box = QComboBox()
+            for key, text in items:
+                box.addItem(text, key)
+                if tips and tips.get(key):
+                    box.setItemData(box.count() - 1, tips[key], Qt.ToolTipRole)
+            i = box.findData(saved)
+            box.setCurrentIndex(i if i >= 0 else 0)
+            box.setMinimumWidth(130)
             row1.addWidget(box)
             row1.addSpacing(14)
-            return grp
+            return box
 
         n = len(self.view.sizes)
         saved_range = st.value("pr_range", "page")
@@ -207,8 +197,8 @@ class PrintDialog(QDialog):
         self.timer = QTimer(self, singleShot=True, interval=60)
         self.timer.timeout.connect(self._render_preview)
         for g in (self.g_paper, self.g_color):
-            g.buttonClicked.connect(lambda *_: self._changed())
-        self.g_range.buttonClicked.connect(self._range_clicked)
+            g.currentIndexChanged.connect(lambda *_: self._changed())
+        self.g_range.activated.connect(self._range_clicked)
         r = main.geometry()
         self.resize(int(r.width() * 0.92), int(r.height() * 0.92))
         self._changed()
@@ -216,7 +206,7 @@ class PrintDialog(QDialog):
     # ----- options
     def opts(self):
         def k(g):
-            return g.checkedButton().property("key")
+            return g.currentData()
         return {"range": k(self.g_range), "paper": k(self.g_paper), "color": k(self.g_color),
                 "printer": self.printer_box.currentText(), "copies": self.copies.value()}
 
@@ -234,12 +224,12 @@ class PrintDialog(QDialog):
         return [self.window_job] if self.window_job else []
 
     def _set_range(self, key):
-        for b in self.g_range.buttons():
-            if b.property("key") == key:
-                b.setChecked(True)
+        i = self.g_range.findData(key)
+        if i >= 0:
+            self.g_range.setCurrentIndex(i)
 
-    def _range_clicked(self, btn):
-        if btn.property("key") == "window":
+    def _range_clicked(self, idx):
+        if self.g_range.itemData(idx) == "window":
             QTimer.singleShot(0, self._pick_window)
         else:
             self._changed()

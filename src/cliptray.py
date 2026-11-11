@@ -164,9 +164,6 @@ class ClipTray(QWidget):
             # פינה שמאלית-תחתונה של אזור השרטוט
             self.move(12, p.height() - self.sizeHint().height() - 26)
 
-    def clear_all(self):
-        for it in list(self.items):
-            self._remove(it)
 
 
 TRAY_STYLE = """

@@ -1,21 +1,25 @@
-# חותמות: שתי תמונות שנשמרות פעם אחת, צביעה בשחור או אדום, וחיפוש מקום פנוי בכל עמוד.
+# חותמות: 2 חותמות קבועות של טיקטין + עד 2 חותמות נוספות (מתמונה או מ-PDF, עם שם קבוע),
+# צביעה בשחור או אדום, תאריך אוטומטי בחותמת הלוחות, וחיפוש מקום פנוי בכל עמוד.
 import base64
 from PySide6.QtCore import Qt, QSettings, QBuffer, QByteArray, QIODevice
 from PySide6.QtGui import QImage, QPainter, QColor
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-                               QButtonGroup, QWidget)
+from default_stamps import STAMPS as BUILTIN
+
+FIXED = (1, 2)          # החותמות הקבועות
+CUSTOM = (3, 4)         # מקומות לחותמות נוספות
 
 MAX_SIDE = 900
 _masks = {}       # slot -> QImage (Alpha8)
 _colored = {}     # (slot, color) -> QImage
 _png = {}         # (slot, color) -> bytes
+_extra = {}       # חותמות שנטענו מתוך קובץ PDF (מפתח -> PNG)
 
 
 def _st():
     return QSettings("Tiktin", "TiktinPDF")
 
 
-def make_mask(img):
+def make_mask(img, want_offset=False):
     """הופך תמונת חותמת למסכה: דיו כהה = אטום, נייר לבן או רקע שקוף = שקוף. חותך שוליים ריקים."""
     img = img.convertToFormat(QImage.Format_ARGB32)
     if max(img.width(), img.height()) > MAX_SIDE:
@@ -56,7 +60,8 @@ def make_mask(img):
         return None
     # נשמר כתמונה אפורה (ערך = אטימות), נקרא בחזרה כמסכת שקיפות
     m = QImage(bytes(out), w, h, w, QImage.Format_Grayscale8).copy()
-    return m.copy(xs0, ys0, xs1 - xs0 + 1, ys1 - ys0 + 1)
+    cm = m.copy(xs0, ys0, xs1 - xs0 + 1, ys1 - ys0 + 1)
+    return (cm, xs0, ys0, w / img.width()) if want_offset else cm
 
 
 def _to_png(img):
@@ -68,22 +73,66 @@ def _to_png(img):
     return bytes(ba)
 
 
-def load_file(slot, path):
-    img = QImage(path)
+def _read_image(path):
+    """תמונה רגילה, או העמוד הראשון של קובץ PDF (ברזולוציה גבוהה)."""
+    if path.lower().endswith(".pdf"):
+        import pymupdf
+        doc = pymupdf.open(path)
+        pg = doc[0]
+        z = min(300 / 72.0, 2400.0 / max(pg.rect.width, pg.rect.height))
+        pix = pg.get_pixmap(matrix=pymupdf.Matrix(z, z), alpha=False)
+        img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
+        doc.close()
+        return img
+    return QImage(path)
+
+
+def load_file(slot, path, name=None):
+    img = _read_image(path)
     if img.isNull():
         return False
     m = make_mask(img)
     if m is None:
         return False
-    _st().setValue(f"stamp{slot}", base64.b64encode(_to_png(m)).decode())
+    st = _st()
+    st.setValue(f"stamp{slot}", base64.b64encode(_to_png(m)).decode())
+    if name:
+        st.setValue(f"stamp{slot}_name", name)
+    _forget(slot)
+    return True
+
+
+def remove(slot):
+    st = _st()
+    st.remove(f"stamp{slot}")
+    st.remove(f"stamp{slot}_name")
+    _forget(slot)
+
+
+def _forget(slot):
     _masks.pop(slot, None)
     for k in [k for k in _colored if k[0] == slot]:
         _colored.pop(k, None)
         _png.pop(k, None)
-    return True
 
 
-_extra = {}       # חותמות שנטענו מתוך קובץ PDF (מפתח -> PNG)
+def name(slot):
+    if slot in BUILTIN:
+        return BUILTIN[slot]["name"]
+    return _st().value(f"stamp{slot}_name", "") or f"חותמת {slot}"
+
+
+def date_pos(slot):
+    """מיקום שדה התאריך בחותמת (יחסי), או None."""
+    d = BUILTIN.get(slot, {}).get("date") if slot in FIXED else None
+    return tuple(d) if d else None
+
+
+def free_custom_slot():
+    for s_ in CUSTOM:
+        if not has(s_):
+            return s_
+    return None
 
 
 def register(key, png):
@@ -95,13 +144,20 @@ def mask_png(slot):
     """ה-PNG של מסכת החותמת (לשמירה בתוך הקובץ)."""
     if slot in _extra:
         return _extra[slot]
+    if slot in FIXED:
+        return base64.b64decode(BUILTIN[slot]["png"])
     raw = _st().value(f"stamp{slot}", "")
     return base64.b64decode(raw) if raw else b""
 
 
 def mask(slot):
     if slot not in _masks:
-        raw = base64.b64encode(_extra[slot]).decode() if slot in _extra else _st().value(f"stamp{slot}", "")
+        if slot in _extra:
+            raw = base64.b64encode(_extra[slot]).decode()
+        elif slot in FIXED:
+            raw = BUILTIN[slot]["png"]
+        else:
+            raw = _st().value(f"stamp{slot}", "")
         m = None
         if raw:
             g = QImage.fromData(base64.b64decode(raw), "PNG")
@@ -209,75 +265,3 @@ def find_free_spot(page, W, H, cx, cy, margin=4.0):
     return cx, cy, False
 
 
-# ---------------------------------------------------------------- dialog
-class StampDialog(QDialog):
-    """בחירת צבע החותמת ואם להוסיף אותה לעמוד הנוכחי או לכל העמודים."""
-
-    def __init__(self, parent, slot, color, n_pages):
-        super().__init__(parent)
-        self.setWindowTitle(f"חותמת {slot}")
-        self.setLayoutDirection(Qt.RightToLeft)
-        st = _st()
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 18, 20, 18)
-        lay.setSpacing(14)
-
-        def seg(label, opts, cur):
-            row = QHBoxLayout()
-            lab = QLabel(label)
-            lab.setMinimumWidth(70)
-            row.addWidget(lab)
-            box = QWidget()
-            h = QHBoxLayout(box)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(0)
-            grp = QButtonGroup(self)
-            for k, (key, text) in enumerate(opts):
-                b = QPushButton(text)
-                b.setObjectName("seg")
-                b.setCheckable(True)
-                b.setProperty("key", key)
-                b.setMinimumWidth(110)
-                grp.addButton(b, k)
-                h.addWidget(b)
-                if key == cur:
-                    b.setChecked(True)
-            if grp.checkedButton() is None:
-                grp.buttons()[0].setChecked(True)
-            row.addWidget(box)
-            row.addStretch(1)
-            lay.addLayout(row)
-            return grp
-
-        self.color_grp = seg("צבע", [("#000000", "שחור"), ("#d0021b", "אדום")],
-                             st.value("stamp_color", color))
-        self.where_grp = seg("איפה", [("page", "בעמוד הנוכחי"), ("all", f"בכל העמודים ({n_pages})")],
-                             st.value("stamp_where", "page"))
-        if n_pages < 2:
-            self.where_grp.buttons()[1].setEnabled(False)
-            self.where_grp.buttons()[0].setChecked(True)
-        tip = QLabel("אחרי האישור מקליקים על השרטוט במקום החותמת.\n"
-                     "בכל העמודים: בשאר העמודים החותמת תונח במקום פנוי מטקסט, קרוב לאותו מקום.")
-        tip.setStyleSheet("color:#5b6470;")
-        tip.setAlignment(Qt.AlignAbsolute | Qt.AlignRight)
-        lay.addWidget(tip)
-        btns = QHBoxLayout()
-        btns.addStretch(1)
-        cancel = QPushButton("ביטול")
-        cancel.setObjectName("plainBtn")
-        ok = QPushButton("המשך להצבה")
-        ok.setObjectName("primaryBtn")
-        ok.setDefault(True)
-        btns.addWidget(cancel)
-        btns.addWidget(ok)
-        lay.addLayout(btns)
-        cancel.clicked.connect(self.reject)
-        ok.clicked.connect(self._ok)
-
-    def _ok(self):
-        self.color = self.color_grp.checkedButton().property("key")
-        self.where = self.where_grp.checkedButton().property("key")
-        st = _st()
-        st.setValue("stamp_color", self.color)
-        st.setValue("stamp_where", self.where)
-        self.accept()
