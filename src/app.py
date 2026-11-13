@@ -11,7 +11,7 @@ from PySide6.QtCore import (Qt, QTimer, QThread, Signal, QObject, QRectF,
                             QPointF, QSettings, QSize, QEvent)
 from PySide6.QtGui import (QPainter, QImage, QPixmap, QColor, QIcon, QKeySequence, QTextCursor,
                            QShortcut, QPalette, QCursor, QFont)
-from PySide6.QtWidgets import (QApplication, QMainWindow, QAbstractScrollArea,
+from PySide6.QtWidgets import (QApplication, QMainWindow, QAbstractScrollArea, QHBoxLayout,
                                QToolBar, QToolButton, QLabel, QLineEdit, QComboBox,
                                QFileDialog, QMessageBox, QInputDialog, QWidget,
                                QSizePolicy, QDialog, QMenu, QProgressDialog)
@@ -32,6 +32,7 @@ import stamps
 from scale_detect import analyzer_main
 from cliptray import ClipTray, TRAY_STYLE
 import marks_store
+from ribbon import RibbonButton, RIBBON_STYLE
 
 APP_NAME = "טיקטין PDF A"
 TILE = 512                 # גודל אריח בפיקסלים של המסך
@@ -857,7 +858,7 @@ class PdfView(QAbstractScrollArea):
         d, t = r.get("dims"), r.get("text")
         if d and t and d != t:
             return (f"שימו לב: בשרטוט כתוב 1:{t}, אבל המידות מתאימות ל-1:{d}. "
-                    f"נקבע 1:{d} — אפשר לשנות בסרגל")
+                    f"נקבע 1:{d} — אפשר לשנות במדידה ← קנה מידה לעמוד")
         if d:
             return f"קנ\"מ 1:{d} אומת מול {r.get('votes', 0)} מידות בשרטוט"
         if t:
@@ -2099,6 +2100,8 @@ class PdfView(QAbstractScrollArea):
         elif k == Qt.Key_Escape and self.tool == "erase_rect" and self.erase_rect:
             self.erase_rect = None
             self.viewport().update()
+        elif k == Qt.Key_Escape and self.tool == "pan" and not self.select_mode and self.window().isFullScreen():
+            self.window()._toggle_full()
         elif k == Qt.Key_Escape and self.tool != "pan":
             if self.dim_start or self.shape_start:
                 self.dim_start = None
@@ -2167,12 +2170,13 @@ class MainWindow(QMainWindow):
         else:
             self.resize(1280, 820)
 
-    def _btn(self, text, tip, slot, primary=False, checkable=False):
-        b = QToolButton()
-        b.setText(text)
-        b.setToolTip(tip)
+    ICONS = {"פתיחה": "open", "קובץ": "file", "הדפסה": "print", "העתקה": "copy", "הוסף": "add", "חותמות": "stamp",
+             "מחיקה מהשרטוט": "erase", "סיבוב": "rotate", "תצוגה": "view", "שמירת\nשינויים": "save"}
+    LABELS = {"מחיקה מהשרטוט": "מחיקה\nמהשרטוט"}
+
+    def _btn(self, text, tip, slot, primary=False, checkable=False, icon=None):
+        b = RibbonButton(self.LABELS.get(text, text), tip, icon or self.ICONS.get(text), main=primary)
         b.setCheckable(checkable)
-        b.setObjectName("primary" if primary else "tb")
         if checkable:
             b.toggled.connect(slot)
         else:
@@ -2186,10 +2190,7 @@ class MainWindow(QMainWindow):
         return m
 
     def _menu_btn(self, text, tip, menu, checkable=False):
-        b = QToolButton()
-        b.setObjectName("tb")
-        b.setText(text + " ▾")
-        b.setToolTip(tip)
+        b = RibbonButton(self.LABELS.get(text, text) + " ▾", tip, self.ICONS.get(text))
         b.setCheckable(checkable)
         b.setPopupMode(QToolButton.InstantPopup)
         b.setMenu(menu)
@@ -2206,33 +2207,42 @@ class MainWindow(QMainWindow):
             a.setShortcutVisibleInContextMenu(True)
         return a
 
-    @staticmethod
-    def _glyph_icon(ch):
-        pm = QPixmap(36, 36)
-        pm.fill(Qt.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.Antialiasing)
-        f = QFont("Segoe UI Symbol")
-        f.setPixelSize(30)
-        p.setFont(f)
-        p.setPen(QColor("#1f2630"))
-        p.drawText(pm.rect(), Qt.AlignCenter, ch)
-        p.end()
-        return QIcon(pm)
-
     def _build_toolbar(self):
+        # ----- שורה עליונה (כמו בשאר אפליקציות טיקטין): לוגו, שם, גרסה, ובצד שמאל כפתורי הגודל
+        hd = QToolBar()
+        hd.setObjectName("hdr")
         tb = QToolBar()
-        tb.setMovable(False)
-        tb.setFloatable(False)
-        tb.setContextMenuPolicy(Qt.PreventContextMenu)
+        tb.setObjectName("ribbon")
+        for t_ in (hd, tb):
+            t_.setMovable(False)
+            t_.setFloatable(False)
+            t_.setContextMenuPolicy(Qt.PreventContextMenu)
+        self.addToolBar(Qt.TopToolBarArea, hd)
+        self.addToolBarBreak(Qt.TopToolBarArea)
         self.addToolBar(Qt.TopToolBarArea, tb)
+        self.hdr_bar, self.ribbon_bar = hd, tb
         logo = QLabel()
         pm = QPixmap()
         pm.loadFromData(base64.b64decode(LOGO_B64))
-        logo.setPixmap(pm.scaledToHeight(27, Qt.SmoothTransformation))
-        logo.setContentsMargins(4, 0, 8, 0)
-        tb.addWidget(logo)
+        logo.setPixmap(pm.scaledToHeight(34, Qt.SmoothTransformation))
+        hd.addWidget(logo)
+        ttl = QLabel(APP_NAME)
+        ttl.setObjectName("apptitle")
+        hd.addWidget(ttl)
+        self.file_lbl = QLabel("")
+        self.file_lbl.setObjectName("filename")
+        hd.addWidget(self.file_lbl)
+        hver = QLabel(f"גרסה {VERSION} · עודכן {BUILD_DATE}")
+        hver.setObjectName("hver")
+        hd.addWidget(hver)
+        hsp = QWidget()
+        hsp.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        hd.addWidget(hsp)
+        self._hdr = hd
         tb.addWidget(self._btn("פתיחה", "פתיחת קובץ PDF (Ctrl+O)", self.open_dialog, primary=True))
+        tb.addSeparator()
+        tb.addWidget(self._btn("שמירת\nשינויים", "שומר את התוספות ואת מחיקת העמודים בתוך הקובץ הפתוח (Ctrl+S)",
+                               self.save_changes))
 
         # ----- קובץ
         fm = self._menu(self)
@@ -2256,6 +2266,7 @@ class MainWindow(QMainWindow):
                                   self._copy_clicked)
         self.copy_btn.setCheckable(True)
         tb.addWidget(self.copy_btn)
+        tb.addSeparator()
 
         # ----- הוסף
         am = self._menu(self)
@@ -2323,19 +2334,16 @@ class MainWindow(QMainWindow):
                   "מסמנים קו שאורכו ידוע ומקלידים את אורכו האמיתי — הקנ\"מ יחושב")
         self._act(mm2, "בדיקת קנ\"מ מחדש מול המידות", self._reanalyze,
                   "מבטל קנ\"מ שנקבע ידנית בעמוד ובודק שוב לפי הכיתוב והמידות בשרטוט")
-        mb = QToolButton()
-        mb.setObjectName("tbsplit")
-        mb.setText("מדידה")
+        mb = RibbonButton("מדידה", "לחיצה: מתחילים למדוד (שתי הקלקות על השרטוט, התוצאה בס\"מ).\n"
+                          "לחיצה נוספת או Esc: מפסיקים.  החץ הקטן שבצד: כיול, בדיקת קנ\"מ וקנה מידה לעמוד", "ruler")
         mb.setCheckable(True)
-        mb.setToolTip("לחיצה: מתחילים למדוד (שתי הקלקות על השרטוט, התוצאה בס\"מ).\n"
-                      "לחיצה נוספת או Esc: מפסיקים.  החץ הקטן: כיול ובדיקת קנ\"מ")
         mb.setPopupMode(QToolButton.MenuButtonPopup)
         mb.setMenu(mm2)
         mb.clicked.connect(self._measure_toggle)
-        # רוחב מספיק כדי שהמילה "מדידה" תיראה במלואה גם ליד החץ של התפריט (גם בגופן ובהגדלה של Windows)
-        mb.setMinimumWidth(max(100, mb.fontMetrics().horizontalAdvance("מדידה") * 2 + 34))
+        mb.setMinimumWidth(74)
         self.measure_btn = mb
         tb.addWidget(self.measure_btn)
+        tb.addSeparator()
         self.scale_box = QComboBox()
         self.scale_box.setEditable(True)
         self.scale_box.setInsertPolicy(QComboBox.NoInsert)
@@ -2352,21 +2360,17 @@ class MainWindow(QMainWindow):
         self._act(scm, "קנ\"מ אחר...", self._scale_other)
 
         # ----- עריכה וצבע
-        for arrow, word, tip, fn in (("↶", "UNDO", "ביטול הפעולה האחרונה (Ctrl+Z)", self.view.do_undo),
-                                     ("↷", "REDO", "חזרה על הפעולה שבוטלה (Ctrl+Y)", self.view.do_redo)):
-            b = QToolButton()
-            b.setObjectName("tbur")
-            b.setToolTip(tip)
-            b.setText(word)
-            b.setIcon(self._glyph_icon(arrow))
-            b.setIconSize(QSize(14, 14))
-            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-            b.setLayoutDirection(Qt.LeftToRight)
-            b.clicked.connect(fn)
-            tb.addWidget(b)
-        self.del_btn = self._btn("✕", "מחיקת הסימון שנבחר (Delete)", self.view.delete_selected)
+        tb.addWidget(self._btn("ביטול\nפעולה", "UNDO — ביטול הפעולה האחרונה (Ctrl+Z)", self.view.do_undo, icon="undo"))
+        tb.addWidget(self._btn("החזרת\nפעולה", "REDO — חזרה על הפעולה שבוטלה (Ctrl+Y)", self.view.do_redo, icon="redo"))
+        self.del_btn = self._btn("מחיקת\nסימון", "מחיקת הסימון שנבחר (Delete)", self.view.delete_selected, icon="x")
         tb.addWidget(self.del_btn)
         self.color_btn = ColorButton(self.view.pen_color)
+        self.color_btn.setObjectName("rb")
+        self.color_btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self.color_btn.setIconSize(QSize(24, 24))
+        self.color_btn.setFocusPolicy(Qt.NoFocus)
+        self.color_btn.fixed_text = "צבע"
+        self.color_btn.setText("צבע")
         self.color_btn.changed.connect(self._pen_color)
         tb.addWidget(self.color_btn)
         self.width_box = QComboBox()
@@ -2388,19 +2392,18 @@ class MainWindow(QMainWindow):
         self.tsize_box.currentIndexChanged.connect(self._text_size)
         self.tsize_act = tb.addWidget(self.tsize_box)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        tb.addWidget(spacer)
+        tb.addSeparator()
 
-        # ----- עמוד וזום
+        # ----- סיבוב ועמוד
+        plbl = QLabel("עמוד")
+        plbl.setObjectName("pagelbl")
         self.page_edit = QLineEdit()
         self.page_edit.setFixedWidth(40)
         self.page_edit.setAlignment(Qt.AlignCenter)
         self.page_edit.setToolTip("מספר עמוד — הקלידו ולחצו Enter")
         self.page_edit.returnPressed.connect(self._goto_page)
-        tb.addWidget(self.page_edit)
         self.page_total = QLabel(" / – ")
-        tb.addWidget(self.page_total)
+        self.page_total.setObjectName("pagelbl")
         rm = self._menu(self)
         for scope, title in (("page", "העמוד הנוכחי"), ("all", "כל העמודים")):
             sm = rm.addMenu(title)
@@ -2420,18 +2423,43 @@ class MainWindow(QMainWindow):
         self.rotate_btn = self._menu_btn("סיבוב", "סיבוב העמוד הנוכחי או כל העמודים: 90°, 180°, לאורך, לרוחב "
                                                    "או טקסט ישר (Ctrl+R)", rm)
         tb.addWidget(self.rotate_btn)
-        tb.addWidget(self._btn("−", "הקטנה (Ctrl+-)", lambda: self.view.set_zoom(self.view.zoom / 1.25)))
+        tb.addWidget(plbl)
+        tb.addWidget(self.page_edit)
+        tb.addWidget(self.page_total)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+
+        # ----- כפתורי הגודל, בשורה העליונה בצד שמאל (לא משפיעים על שום דבר מחוץ לתוכנה)
+        def fz(text, tip, fn):
+            b_ = QToolButton()
+            b_.setObjectName("fz")
+            b_.setText(text)
+            b_.setToolTip(tip)
+            b_.setFocusPolicy(Qt.NoFocus)
+            b_.clicked.connect(fn)
+            return b_
+        for w_ in (logo, ttl, self.file_lbl, hver):
+            w_.setContentsMargins(0, 0, 14, 0)
+        zg = QWidget()
+        zl = QHBoxLayout(zg)
+        zl.setContentsMargins(0, 0, 0, 0)
+        zl.setSpacing(0)
+        zl.addWidget(fz("−", "הקטנה (Ctrl+-)", lambda: self.view.set_zoom(self.view.zoom / 1.25)))
         self.zoom_box = QComboBox()
         self.zoom_box.setEditable(True)
         self.zoom_box.setInsertPolicy(QComboBox.NoInsert)
         self.zoom_box.addItems(["25%", "50%", "75%", "100%", "150%", "200%", "400%", "800%", "1600%"])
-        self.zoom_box.setFixedWidth(60)
-        self.zoom_box.setToolTip("אחוז זום — בחרו או הקלידו")
+        self.zoom_box.setFixedWidth(70)
+        self.zoom_box.setToolTip("אחוז ההגדלה של השרטוט — בחרו או הקלידו")
         self.zoom_box.lineEdit().setAlignment(Qt.AlignCenter)
+        self.zoom_box.setStyleSheet("QComboBox { border-radius: 0; margin-left: -1px; }")
         self.zoom_box.textActivated.connect(self._zoom_text)
-        tb.addWidget(self.zoom_box)
-        tb.addWidget(self._btn("+", "הגדלה (Ctrl++)", lambda: self.view.set_zoom(self.view.zoom * 1.25)))
-        tb.addWidget(self._btn("⛶", "עמוד מלא — הצגת העמוד כולו במסך (Ctrl+0)", self.view.fit_page))
+        zl.addWidget(self.zoom_box)
+        zl.addWidget(fz("+", "הגדלה (Ctrl++)", lambda: self.view.set_zoom(self.view.zoom * 1.25)))
+        zl.addWidget(fz("התאמה למסך", "הצגת העמוד כולו במסך (Ctrl+0)", self.view.fit_page))
+        zl.addWidget(fz("התאמה לרוחב", "העמוד ממלא את רוחב החלון (Ctrl+2)", self.view.fit_width))
+        hd.addWidget(zg)
         vm = self._menu(self)
         self._act(vm, "התאמה לרוחב", self.view.fit_width, shortcut="Ctrl+2")
         self._act(vm, "עמוד מלא", self.view.fit_page, shortcut="Ctrl+0")
@@ -2444,7 +2472,13 @@ class MainWindow(QMainWindow):
         self._act(vm, "מסך מלא", self._toggle_full, shortcut="F11")
         vm.addSeparator()
         self._act(vm, "הוראות הפעלה", self.show_help, shortcut="F1")
+        tb.addSeparator()
         tb.addWidget(self._menu_btn("תצוגה", "התאמה לרוחב, 100%, מצב גלגלת ומסך מלא", vm))
+        tb.addWidget(self._btn("מסך מלא", "השרטוט על כל המסך, בלי הסרגלים (F11). Esc או F11 חוזרים", self._toggle_full,
+                               icon="full"))
+        tb.addWidget(self._btn("הוראות\nF1", "הוראות ההפעלה של התוכנה (F1)", self.show_help, icon="help"))
+        tb.addWidget(self._btn("אפליקציה\nראשית", "פתיחת האפליקציה הראשית של טיקטין בדפדפן", self._open_portal,
+                               icon="home"))
         ver = QLabel(f" גרסה {VERSION} | {BUILD_DATE} ")
         ver.setObjectName("ver")
         ver.setToolTip(f"גרסה {VERSION}, עודכנה {BUILD_DATE}. F1 = הוראות הפעלה")
@@ -2693,6 +2727,8 @@ class MainWindow(QMainWindow):
                 # סגנון ישיר על הכפתור: אדום בוודאות, גם כשהעכבר מעליו או כשהוא בפוקוס
                 b.setProperty("active", bool(on))
                 b.setStyleSheet(ACTIVE_BTN_CSS if on else "")
+                if hasattr(b, "set_active"):
+                    b.set_active(bool(on))
 
     def show_help(self):
         if getattr(self, "_help", None) is not None:
@@ -2705,7 +2741,36 @@ class MainWindow(QMainWindow):
         self._help.show()
 
     def _toggle_full(self):
-        self.showNormal() if self.isFullScreen() else self.showFullScreen()
+        """מסך מלא: רק השרטוט, בלי הסרגלים. Esc או F11 חוזרים."""
+        full = not self.isFullScreen()
+        if full:
+            self._was_max = self.isMaximized()
+            self.showFullScreen()
+        else:
+            self.showMaximized() if getattr(self, "_was_max", False) else self.showNormal()
+        for w_ in (self.hdr_bar, self.ribbon_bar, self.statusBar()):
+            w_.setVisible(not full)
+        if full:
+            if getattr(self, "_exit_full", None) is None:
+                b = QToolButton(self.view)
+                b.setText("יציאה ממסך מלא  (Esc)")
+                b.setStyleSheet("QToolButton { background: rgba(255,255,255,235); color: #1f2328; border: 1px solid #c8202f;"
+                                " border-radius: 8px; padding: 6px 12px; font-size: 10pt; }"
+                                "QToolButton:hover { background: #c8202f; color: #ffffff; }")
+                b.clicked.connect(self._toggle_full)
+                self._exit_full = b
+            self._exit_full.adjustSize()
+            self._exit_full.move(10, 10)
+            self._exit_full.show()
+            self._exit_full.raise_()
+        elif getattr(self, "_exit_full", None) is not None:
+            self._exit_full.hide()
+        self.view.setFocus()
+
+    def _open_portal(self):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl("https://tiktiny.github.io/tiktin-tools/"))
 
     def _wheel_mode(self, on):
         self.view.wheel_zoom = on
@@ -2878,6 +2943,7 @@ class MainWindow(QMainWindow):
     def _on_changed(self):
         name = os.path.basename(self.view.path or "")
         self.setWindowTitle(f"{'* ' if self.view.dirty else ''}{name} – {APP_NAME}   |   גרסה {VERSION} ({BUILD_DATE})")
+        self.file_lbl.setText(("* " if self.view.dirty else "") + name)
 
     def _show_scale(self, *_):
         v = self.view
@@ -3164,6 +3230,7 @@ class MainWindow(QMainWindow):
             return
         self.settings.setValue("last_dir", os.path.dirname(path))
         self.setWindowTitle(f"{os.path.basename(path)} – {APP_NAME}")
+        self.file_lbl.setText(os.path.basename(path))
         loaded = None
         try:
             loaded = marks_store.load(doc)
@@ -3266,7 +3333,7 @@ def light_palette():
 
 
 ACTIVE_BTN_CSS = ("QToolButton, QToolButton:hover, QToolButton:pressed, QToolButton:checked, QToolButton:focus "
-                  "{ background: #c8202f; border: 1px solid #c8202f; color: #ffffff; font-weight: 600; }")
+                  "{ background: #c8202f; border: 1px solid #c8202f; border-radius: 8px; color: #ffffff; }")
 
 
 def _clean_temp():
@@ -3297,7 +3364,7 @@ def main():
     app.setStyle("Fusion")
     app.setPalette(light_palette())
     app.setLayoutDirection(Qt.RightToLeft)
-    app.setStyleSheet(STYLE + TRAY_STYLE)
+    app.setStyleSheet(STYLE + TRAY_STYLE + RIBBON_STYLE)
     pm = QPixmap()
     pm.loadFromData(base64.b64decode(LOGO_B64))
     if ICON_B64:

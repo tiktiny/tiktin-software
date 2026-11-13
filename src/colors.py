@@ -38,7 +38,7 @@ class ColorButton(QToolButton):
         if c not in dict(PALETTE):
             c = "#d0021b"
         self.color = c
-        self.setIcon(swatch(c))
-        self.setText(dict(PALETTE)[c])
+        self.setIcon(swatch(c, 24, 24))
+        self.setText(getattr(self, "fixed_text", None) or dict(PALETTE)[c])
         if emit:
             self.changed.emit(c)
