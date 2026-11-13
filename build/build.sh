@@ -15,9 +15,13 @@ python build/trim.py "$ROOT/winpy"
 curl -sL -o logo.png https://raw.githubusercontent.com/tiktiny/tiktin-tools/main/tiktin-logo.png
 mkdir -p "$ROOT/winpy/app" "$ROOT/out"
 python build/make_assets.py logo.png "$VER" "$DATE" "$ROOT/winpy/app/version.py" "$ROOT/out/tiktin_pdf.ico" "$LETTER"
+# אייקון לתוכנת "חותמת לוחות אוטומטית" (אותו אייקון, עם האות ח)
+python build/make_assets.py logo.png "$VER" "$DATE" "$ROOT/out/_unused_version.py" "$ROOT/out/tiktin_stamp.ico" "ח"
+rm -f "$ROOT/out/_unused_version.py"
 cp src/*.py "$ROOT/winpy/app/"
 python -m compileall -q "$ROOT/winpy/app"
 cd build
 makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVNUM="$VNUM" launcher.nsi
+makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVNUM="$VNUM" launcher_stamp.nsi
 makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVNUM="$VNUM" installer.nsi
 ls -la "$ROOT/out"
