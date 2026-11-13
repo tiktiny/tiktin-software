@@ -201,67 +201,103 @@ def png_bytes(slot, color):
     return _png[key]
 
 
-# ---------------------------------------------------------------- free spot
-def find_free_spot(page, W, H, cx, cy, margin=4.0):
-    """מחפש מקום פנוי מטקסט, קרוב ככל האפשר ל-(cx, cy), לחותמת ברוחב W וגובה H (נקודות, עמוד מוצג)."""
+# ---------------------------------------------------------------- free spot / size
+INK_SIDE = 300            # רזולוציית מפת הדיו: הצלע הארוכה של העמוד בפיקסלים (קטן = מהיר)
+TEXT_FRAC = {1: 0.11, 2: 0.07}    # גובה שורת כתב בחותמת ביחס לגובה החותמת
+
+
+def page_ink(page):
+    """מפת "דיו" של העמוד — טקסט, קווים וסריקה — מפענוח אחד של העמוד, וגם גובה הכתב האופייני בו.
+    מחזיר dict: cell (נק' לתא), nx, ny, sat (טבלת סכומים מצטברים), text_h (נק', או None)."""
     import pymupdf
     pr = page.rect
-    PW, PH = pr.width, pr.height
-    cell = max(2.0, min(W, H) / 8.0)
-    nx, ny = int(PW / cell) + 1, int(PH / cell) + 1
-    grid = bytearray(nx * ny)
-    rm = page.rotation_matrix
-    try:
-        words = page.get_text("words")
-    except Exception:
-        words = []
-    for w_ in words:
-        r = (pymupdf.Rect(w_[:4]) * rm).normalize() if page.rotation else pymupdf.Rect(w_[:4])
-        x0, y0 = max(0, int((r.x0 - 1) / cell)), max(0, int((r.y0 - 1) / cell))
-        x1, y1 = min(nx - 1, int((r.x1 + 1) / cell)), min(ny - 1, int((r.y1 + 1) / cell))
-        for yy in range(y0, y1 + 1):
-            base = yy * nx
-            for xx in range(x0, x1 + 1):
-                grid[base + xx] = 1
-    # טבלת סכומים מצטברים: בדיקת מלבן ב-O(1)
-    sat = [0] * ((nx + 1) * (ny + 1))
+    z = INK_SIDE / max(pr.width, pr.height, 1.0)
+    dl = page.get_displaylist()
+    pix = dl.get_pixmap(matrix=pymupdf.Matrix(z, z), colorspace=pymupdf.csGRAY, alpha=False)
+    nx, ny, stride = pix.width, pix.height, pix.stride
+    tbl = bytes(1 if v < 225 else 0 for v in range(256))
+    ink = pix.samples.translate(tbl)
+    n1 = nx + 1
+    sat = [0] * (n1 * (ny + 1))
     for yy in range(ny):
+        row = ink[yy * stride: yy * stride + nx]
+        a = (yy + 1) * n1
+        b = yy * n1
         run = 0
-        a = (yy + 1) * (nx + 1)
-        b = yy * (nx + 1)
-        g0 = yy * nx
+        if not any(row):
+            sat[a + 1: a + n1] = sat[b + 1: b + n1]
+            continue
         for xx in range(nx):
-            run += grid[g0 + xx]
+            run += row[xx]
             sat[a + xx + 1] = sat[b + xx + 1] + run
+    text_h = None
+    try:
+        hs = sorted(min(w[2] - w[0], w[3] - w[1]) for w in pymupdf.TextPage(dl.get_textpage()).extractWORDS()
+                    if len(w[4]) >= 2)
+        if len(hs) >= 5:
+            text_h = hs[len(hs) // 2] * 0.6          # גובה האותיות עצמן, בלי הרווח שמעל ומתחת
+    except Exception:
+        pass
+    return {"cell": 1.0 / z, "nx": nx, "ny": ny, "sat": sat, "text_h": text_h, "PW": pr.width, "PH": pr.height}
 
-    def busy(x, y):
-        gx0, gy0 = int(x / cell), int(y / cell)
-        gx1, gy1 = min(nx, int((x + W) / cell) + 1), min(ny, int((y + H) / cell) + 1)
-        n1 = nx + 1
-        return sat[gy1 * n1 + gx1] - sat[gy0 * n1 + gx1] - sat[gy1 * n1 + gx0] + sat[gy0 * n1 + gx0]
 
-    def inside(x, y):
-        return margin <= x and margin <= y and x + W <= PW - margin and y + H <= PH - margin
+def auto_width_mm(slot, ink, factor=1.0):
+    """רוחב החותמת (מ"מ) כך שהכתב שבה יהיה בגודל הכתב שבשרטוט; בעמוד בלי טקסט — יחסית לגודל הדף."""
+    side = min(ink["PW"], ink["PH"])
+    th = ink["text_h"] or side * 0.0065
+    h = th / TEXT_FRAC.get(slot, 0.12) * factor
+    h = min(max(h, side * 0.03), side * 0.30)
+    return (h / max(aspect(slot), 0.05)) / (72.0 / 25.4)
 
-    x0, y0 = cx - W / 2, cy - H / 2
-    x0 = min(max(x0, margin), PW - margin - W)
-    y0 = min(max(y0, margin), PH - margin - H)
-    if inside(x0, y0) and busy(x0, y0) == 0:
-        return x0 + W / 2, y0 + H / 2, True
-    step = max(cell, min(W, H) / 4.0)
-    maxr = int(max(PW, PH) / step) + 1
-    for ring in range(1, maxr):
-        best = None
+
+def find_free_spot(ink, W, H, cx, cy, blocked=(), margin=3.0):
+    """המקום הקרוב ביותר ל-(cx, cy) שבו חותמת ברוחב W וגובה H (נקודות) לא מסתירה טקסט, קווים או סימונים.
+    blocked = מלבנים תפוסים נוספים (x0, y0, x1, y1). מחזיר (cx, cy, נמצא מקום נקי לגמרי)."""
+    cell, nx, ny, sat = ink["cell"], ink["nx"], ink["ny"], ink["sat"]
+    n1 = nx + 1
+    gw = min(nx, max(1, int(W / cell + 0.999) + 2))       # כולל שוליים של תא מכל צד
+    gh = min(ny, max(1, int(H / cell + 0.999) + 2))
+    mg = int(margin / cell + 0.5)
+    lo_x, hi_x = mg, nx - gw - mg
+    lo_y, hi_y = mg, ny - gh - mg
+    if hi_x < lo_x:
+        lo_x = hi_x = max(0, (nx - gw) // 2)
+    if hi_y < lo_y:
+        lo_y = hi_y = max(0, (ny - gh) // 2)
+    tx = min(max(int((cx - W / 2) / cell) - 1, lo_x), hi_x)
+    ty = min(max(int((cy - H / 2) / cell) - 1, lo_y), hi_y)
+    bl = [(int(x0 / cell) - gw, int(y0 / cell) - gh, int(x1 / cell) + 1, int(y1 / cell) + 1) for x0, y0, x1, y1 in blocked]
+
+    def cost(gx, gy):
+        c = sat[(gy + gh) * n1 + gx + gw] - sat[gy * n1 + gx + gw] - sat[(gy + gh) * n1 + gx] + sat[gy * n1 + gx]
+        for bx0, by0, bx1, by1 in bl:
+            if bx0 < gx < bx1 and by0 < gy < by1:
+                c += gw * gh
+        return c
+
+    def result(gx, gy, clean):
+        if gx == tx and gy == ty:
+            return cx, cy, clean
+        return (gx + gw / 2.0) * cell, (gy + gh / 2.0) * cell, clean
+
+    c0 = cost(tx, ty)
+    if c0 == 0:
+        return result(tx, ty, True)
+    best = (c0, 0, tx, ty)
+    maxr = max(hi_x - lo_x, hi_y - lo_y) + 1
+    for ring in range(1, maxr + 1):
+        found = None
         for i in range(-ring, ring + 1):
-            for j in (-ring, ring):
-                for dx, dy in ((i, j), (j, i)):
-                    x, y = x0 + dx * step, y0 + dy * step
-                    if inside(x, y) and busy(x, y) == 0:
-                        d = dx * dx + dy * dy
-                        if best is None or d < best[0]:
-                            best = (d, x, y)
-        if best:
-            return best[1] + W / 2, best[2] + H / 2, True
-    return cx, cy, False
-
-
+            for gx, gy in ((tx + i, ty - ring), (tx + i, ty + ring), (tx - ring, ty + i), (tx + ring, ty + i)):
+                if gx < lo_x or gx > hi_x or gy < lo_y or gy > hi_y:
+                    continue
+                c = cost(gx, gy)
+                d = (gx - tx) ** 2 + (gy - ty) ** 2
+                if c == 0:
+                    if found is None or d < found[0]:
+                        found = (d, gx, gy)
+                elif (c, d) < best[:2]:
+                    best = (c, d, gx, gy)
+        if found:
+            return result(found[1], found[2], True)
+    return result(best[2], best[3], False)      # אין מקום נקי לגמרי — המקום שמסתיר הכי פחות

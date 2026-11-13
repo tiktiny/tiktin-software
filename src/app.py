@@ -317,6 +317,8 @@ class PdfView(QAbstractScrollArea):
         self.stamp_job = None
         self.erase_rect = None       # (עמוד, מלבן) של מחיקת אזור שעוד לא אושרה
         self._seg_cache = {}         # עמוד -> קטעי קווים לחיפוש "פריט בודד" (נבנה רק בשימוש)
+        self._ink_cache = {}         # (מסמך, עמוד) -> מפת דיו למציאת מקום פנוי לחותמת
+        self._stamp_clean = True
         self._erase_drag = None
         self._last_erase = None
         self.zoom_timer = QTimer(self, singleShot=True, interval=140)
@@ -1582,12 +1584,48 @@ class PdfView(QAbstractScrollArea):
                     n = max(n, int(it.get("n", 0)))
         return n + 1
 
+    def _page_ink(self, i):
+        """מפת הדיו של עמוד (נבנית פעם אחת לעמוד, מפענוח אחד)."""
+        key = (self.docgen, i)
+        ink = self._ink_cache.get(key)
+        if ink is None:
+            if len(self._ink_cache) > 400:
+                self._ink_cache.clear()
+            ink = self._ink_cache[key] = stamps.page_ink(self.doc[i])
+        return ink
+
+    def stamp_auto_w(self, i, slot):
+        k = QSettings("Tiktin", "TiktinPDF").value(f"stamp_k{slot}", 1.0, type=float) if isinstance(slot, int) else 1.0
+        return stamps.auto_width_mm(slot, self._page_ink(i), min(max(k, 0.3), 4.0))
+
+    def _stamp_fit(self, i, it, autosize=False):
+        """מתאים חותמת לעמוד: גודל לפי הכתב שבשרטוט, ומקום שלא מסתיר טקסט, קווים או סימונים. מחזיר True אם הוזזה."""
+        ink = self._page_ink(i)
+        if autosize:
+            it["w"] = self.stamp_auto_w(i, it.get("slot"))
+        r = EXTRA["stamp"]["bbox"](it)
+        blocked = []
+        for o in self.items.get(i, ()):
+            if o is it:
+                continue
+            try:
+                b = A.item_bbox(o, self.scale_of(i))
+                blocked.append((b.left(), b.top(), b.right(), b.bottom()))
+            except Exception:
+                pass
+        cx0, cy0 = it["c"]
+        cx, cy, clean = stamps.find_free_spot(ink, r.width(), r.height(), cx0, cy0, blocked)
+        it["c"] = (cx, cy)
+        self._stamp_clean = clean
+        return abs(cx - cx0) > 0.5 or abs(cy - cy0) > 0.5
+
     def stamp_all_pages(self, i0, it0):
         """מוסיף את החותמת לשאר העמודים, במקום פנוי מטקסט קרוב למיקום שנבחר בעמוד הראשון."""
         n = len(self.sizes)
         W0, H0 = self.sizes[i0]
         r = EXTRA["stamp"]["bbox"](it0)
         fx, fy = it0["c"][0] / W0, it0["c"][1] / H0
+        del r
         prog = None
         if n > 8:
             prog = QProgressDialog("מוסיף חותמת לכל העמודים...", "ביטול", 0, n - 1, self)
@@ -1595,7 +1633,7 @@ class PdfView(QAbstractScrollArea):
             prog.setWindowModality(Qt.WindowModal)
             prog.setMinimumDuration(300)
         QApplication.setOverrideCursor(Qt.WaitCursor)
-        moved, done = 0, 0
+        moved, done, crowded = 0, 0, []
         try:
             for k, j in enumerate(x for x in range(n) if x != i0):
                 if prog:
@@ -1604,13 +1642,14 @@ class PdfView(QAbstractScrollArea):
                     if prog.wasCanceled():
                         break
                 W, H = self.sizes[j]
-                cx, cy, ok = stamps.find_free_spot(self.doc[j], r.width(), r.height(), fx * W, fy * H)
                 it = dict(it0)
-                it["c"] = (cx, cy)
+                it["c"] = (fx * W, fy * H)
+                if self._stamp_fit(j, it, autosize=True):
+                    moved += 1
+                if not self._stamp_clean:
+                    crowded.append(j)
                 self.items.setdefault(j, []).append(it)
                 done += 1
-                if abs(cx - fx * W) > 1 or abs(cy - fy * H) > 1:
-                    moved += 1
         finally:
             QApplication.restoreOverrideCursor()
             if prog:
@@ -1618,7 +1657,10 @@ class PdfView(QAbstractScrollArea):
         self.dirty = True
         self.changed.emit()
         self.viewport().update()
-        extra = f" (ב-{moved} עמודים הוזזה למקום פנוי מטקסט)" if moved else ""
+        extra = f" (ב-{moved} עמודים הוזזה למקום שלא מסתיר טקסט או שרטוט)" if moved else ""
+        if crowded:
+            pg = ", ".join(str(j + 1) for j in crowded[:12]) + ("..." if len(crowded) > 12 else "")
+            extra += f". בעמודים {pg} אין מקום פנוי לגמרי — הונחה במקום שמסתיר הכי פחות, כדאי לבדוק"
         self.status.emit(f"החותמת נוספה ל-{done + 1} עמודים{extra}. ביטול פעולה מסיר את כולן")
 
     def has_items(self):
@@ -1752,6 +1794,13 @@ class PdfView(QAbstractScrollArea):
             i, pt = self.to_page(ev.position())
             it = dict(self.template)
             it.update({"type": "stamp", "c": (pt.x(), pt.y())})
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                shifted = self._stamp_fit(i, it, autosize=True)
+            except Exception:
+                shifted = False
+            finally:
+                QApplication.restoreOverrideCursor()
             self._push_undo()
             self.items.setdefault(i, []).append(it)
             job = self.stamp_job
@@ -1761,7 +1810,9 @@ class PdfView(QAbstractScrollArea):
             if job == "all":
                 QTimer.singleShot(0, lambda: self.stamp_all_pages(i, it))
             else:
-                self.status.emit("אפשר לגרור את החותמת, להגדיל או להקטין מהפינות ולסובב מהעיגול העליון")
+                self.status.emit(("" if self._stamp_clean else "אין בעמוד מקום פנוי לגמרי — החותמת הונחה במקום שמסתיר הכי פחות. ") +
+                                 ("החותמת הוזזה למקום שלא מסתיר טקסט או שרטוט. " if shifted and self._stamp_clean else "") +
+                                 "אפשר לגרור אותה, להגדיל או להקטין מהפינות ולסובב מהעיגול העליון")
             return
         if ev.button() == Qt.LeftButton and self.tool == "trafo":
             i, pt = self.to_page(ev.position())
@@ -1886,9 +1937,16 @@ class PdfView(QAbstractScrollArea):
             elif orig["type"] in EXTRA:
                 EXTRA[orig["type"]]["resize"](self.items[i][idx], orig, hh, pt)
                 if orig["type"] == "stamp":
+                    # זוכרים את היחס שהמשתמש בחר מול הגודל האוטומטי — כך גם החותמת הבאה תצא בגודל שהוא אוהב
                     sl = self.items[i][idx].get("slot")
-                    QSettings("Tiktin", "TiktinPDF").setValue(
-                        f"stamp_w{sl}" if isinstance(sl, int) else "stamp_w", self.items[i][idx]["w"])
+                    if isinstance(sl, int):
+                        try:
+                            ink = self._page_ink(i)
+                            auto = stamps.auto_width_mm(sl, ink, 1.0)
+                            QSettings("Tiktin", "TiktinPDF").setValue(
+                                f"stamp_k{sl}", min(max(self.items[i][idx]["w"] / max(auto, 0.1), 0.3), 4.0))
+                        except Exception:
+                            pass
                 elif orig["type"] == "mark":
                     QSettings("Tiktin", "TiktinPDF").setValue("mark_s", self.items[i][idx]["s"])
             elif orig["type"] == "text":
@@ -2230,16 +2288,21 @@ class MainWindow(QMainWindow):
         self._act(am, "עט חופשי", lambda: self._tool_clicked("pen", True), "ציור חופשי בצבע ובעובי שנבחרו")
         self._act(am, "מחק עט", lambda: self._tool_clicked("erase", True),
                   "מעבירים על קווי העט כדי למחוק אותם")
-        am.addSeparator()
-        sm = am.addMenu("חותמות")
+        sm = self._menu(self)
         self.stamp_menu = sm
         # התפריט נבנה מראש ומתעדכן רק אחרי הוספה או הסרה של חותמת —
         # בנייה מחדש בזמן שהתפריט נפתח משאירה ב-Windows תפריט ריק
         self._fill_stamp_menu()
         self.add_btn = self._menu_btn("הוסף", "הוספה לשרטוט: חורים, תחנת שנאים, קווים, חצים, צורות, סימנים, "
-                                              "טקסט, עט וחותמות", am, checkable=True)
+                                              "טקסט ועט", am, checkable=True)
         tb.addWidget(self.add_btn)
         self.add_btn.installEventFilter(self)
+
+        self.stamp_btn = self._menu_btn("חותמות", "חותמת טיקטין, חותמת לוחות וחותמות נוספות — בעמוד הנוכחי או בכל העמודים. "
+                                                  "הגודל מותאם לכתב שבשרטוט, והמקום נבחר כך שלא יסתיר טקסט או קווים",
+                                        sm, checkable=True)
+        self.stamp_btn.installEventFilter(self)
+        tb.addWidget(self.stamp_btn)
 
         # ----- מחיקה מהשרטוט המקורי
         em = self._menu(self)
@@ -2531,7 +2594,14 @@ class MainWindow(QMainWindow):
         if not self._need_doc():
             return
         v = self.view
-        w = self.settings.value(f"stamp_w{slot}", 60.0 if slot == 2 else 40.0, type=float)
+        # הגודל נקבע לפי הכתב שבשרטוט (ובעמוד בלי טקסט — לפי גודל הדף), ומחושב שוב בעמוד שבו מקליקים
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            w = v.stamp_auto_w(max(0, v._cur_page), slot)
+        except Exception:
+            w = 30.0
+        finally:
+            QApplication.restoreOverrideCursor()
         tpl = {"slot": slot, "w": w, "ar": stamps.aspect(slot), "color": color}
         dp = stamps.date_pos(slot)
         if dp:
@@ -2540,7 +2610,7 @@ class MainWindow(QMainWindow):
             tpl["datepos"] = list(dp)
         v.set_tool("stamp", tpl)
         v.stamp_job = where
-        self.statusBar().showMessage("מקליקים על השרטוט במקום החותמת. Esc מבטל")
+        self.statusBar().showMessage("מקליקים על השרטוט במקום החותמת — אם המקום תפוס, היא תונח במקום הפנוי הקרוב. Esc מבטל")
         v.setFocus()
 
     def _measure_toggle(self):
@@ -2556,12 +2626,13 @@ class MainWindow(QMainWindow):
             self.view.reanalyze()
             self._show_scale()
 
-    ADD_TOOLS = ("hole", "pen", "erase", "text", "trafo", "shape", "mark", "stamp")
+    ADD_TOOLS = ("hole", "pen", "erase", "text", "trafo", "shape", "mark")
 
     def eventFilter(self, obj, ev):
         # כשכלי הוספה פעיל, לחיצה על "הוסף" מפסיקה אותו (במקום לפתוח שוב את התפריט)
         if ev.type() == QEvent.MouseButtonPress and (
                 (obj is getattr(self, "add_btn", None) and self.view.tool in self.ADD_TOOLS) or
+                (obj is getattr(self, "stamp_btn", None) and self.view.tool == "stamp") or
                 (obj is getattr(self, "erase_btn", None) and self.view.tool in ("erase_item", "erase_rect"))):
             self.view.set_tool("pan")
             self.statusBar().clearMessage()
@@ -2610,6 +2681,7 @@ class MainWindow(QMainWindow):
                       (getattr(self, "print_btn", None), v.select_mode and v.select_purpose == "print"),
                       (getattr(self, "add_btn", None), v.tool in self.ADD_TOOLS),
                       (getattr(self, "measure_btn", None), v.tool in ("dim", "calib")),
+                      (getattr(self, "stamp_btn", None), v.tool == "stamp"),
                       (getattr(self, "erase_btn", None), v.tool in ("erase_item", "erase_rect"))):
             if b is None:
                 continue
@@ -3139,7 +3211,7 @@ STYLE = f"""
 QMainWindow {{ background: #ffffff; }}
 QToolBar {{ background: #ffffff; border: none; border-bottom: 1px solid #d4d8de; padding: 4px 3px; spacing: 3px; }}
 QToolButton#tb {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
-                  padding: 0 5px; min-height: 30px; max-height: 30px; font-size: 9.5pt; }}
+                  padding: 0 4px; min-height: 30px; max-height: 30px; font-size: 9.25pt; }}
 QToolButton#tb::menu-indicator {{ image: none; width: 0; }}
 QToolButton#tbsplit {{ color: #1f2630; background: #ffffff; border: 1px solid #cfd4db; border-radius: 4px;
                       padding: 0 24px 0 24px; min-height: 30px; max-height: 30px; font-size: 9.5pt; }}
