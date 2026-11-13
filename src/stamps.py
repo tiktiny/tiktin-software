@@ -1,12 +1,12 @@
-# חותמות: 2 חותמות קבועות של טיקטין + עד 2 חותמות נוספות (מתמונה או מ-PDF, עם שם קבוע),
-# צביעה בשחור או אדום, תאריך אוטומטי בחותמת הלוחות, וחיפוש מקום פנוי בכל עמוד.
+# חותמות: חותמת לוחות ריקה מובנית + עד 3 חותמות נוספות (מתמונה או מ-PDF, עם שם קבוע, רק במחשב הזה),
+# צביעה בשחור או אדום, וחיפוש מקום פנוי בכל עמוד.
 import base64
 from PySide6.QtCore import Qt, QSettings, QBuffer, QByteArray, QIODevice
 from PySide6.QtGui import QImage, QPainter, QColor
 from default_stamps import STAMPS as BUILTIN
 
-FIXED = (1, 2)          # החותמות הקבועות
-CUSTOM = (3, 4)         # מקומות לחותמות נוספות
+FIXED = (5,)            # החותמת הקבועה: חותמת לוחות ריקה (בלי חתימה — מטעמי אבטחה)
+CUSTOM = (3, 4, 6)      # מקומות לחותמות נוספות — נשמרות רק במחשב של המשתמש
 
 MAX_SIDE = 900
 _masks = {}       # slot -> QImage (Alpha8)
@@ -98,6 +98,12 @@ def load_file(slot, path, name=None):
     st.setValue(f"stamp{slot}", base64.b64encode(_to_png(m)).decode())
     if name:
         st.setValue(f"stamp{slot}_name", name)
+    # קובץ חותמת של טיקטין יכול לציין איפה כותבים את התאריך (שדה TiktinDate בתוך ה-PNG)
+    dp = img.text("TiktinDate") if hasattr(img, "text") else ""
+    if dp:
+        st.setValue(f"stamp{slot}_date", dp)
+    else:
+        st.remove(f"stamp{slot}_date")
     _forget(slot)
     return True
 
@@ -106,6 +112,7 @@ def remove(slot):
     st = _st()
     st.remove(f"stamp{slot}")
     st.remove(f"stamp{slot}_name")
+    st.remove(f"stamp{slot}_date")
     _forget(slot)
 
 
@@ -123,9 +130,15 @@ def name(slot):
 
 
 def date_pos(slot):
-    """מיקום שדה התאריך בחותמת (יחסי), או None."""
-    d = BUILTIN.get(slot, {}).get("date") if slot in FIXED else None
-    return tuple(d) if d else None
+    """מיקום שדה התאריך בחותמת (יחסי), או None אם אין בה שדה תאריך."""
+    if slot in FIXED:
+        d = BUILTIN.get(slot, {}).get("date")
+        return tuple(d) if d else None
+    try:
+        v = [float(x) for x in str(_st().value(f"stamp{slot}_date", "")).split(",")]
+        return tuple(v) if len(v) == 3 else None
+    except ValueError:
+        return None
 
 
 def free_custom_slot():
@@ -203,7 +216,7 @@ def png_bytes(slot, color):
 
 # ---------------------------------------------------------------- free spot / size
 INK_SIDE = 300            # רזולוציית מפת הדיו: הצלע הארוכה של העמוד בפיקסלים (קטן = מהיר)
-TEXT_FRAC = {1: 0.11, 2: 0.07}    # גובה שורת כתב בחותמת ביחס לגובה החותמת
+TEXT_FRAC = {5: 0.086}    # גובה שורת כתב בחותמת ביחס לגובה החותמת
 
 
 def page_ink(page):
@@ -245,7 +258,7 @@ def auto_width_mm(slot, ink, factor=1.0):
     """רוחב החותמת (מ"מ) כך שהכתב שבה יהיה בגודל הכתב שבשרטוט; בעמוד בלי טקסט — יחסית לגודל הדף."""
     side = min(ink["PW"], ink["PH"])
     th = ink["text_h"] or side * 0.0065
-    h = th / TEXT_FRAC.get(slot, 0.12) * factor
+    h = th / TEXT_FRAC.get(slot, 0.086 if date_pos(slot) else 0.12) * factor
     h = min(max(h, side * 0.03), side * 0.30)
     return (h / max(aspect(slot), 0.05)) / (72.0 / 25.4)
 

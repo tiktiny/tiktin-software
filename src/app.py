@@ -2309,7 +2309,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.add_btn)
         self.add_btn.installEventFilter(self)
 
-        self.stamp_btn = self._menu_btn("חותמות", "חותמת טיקטין, חותמת לוחות וחותמות נוספות — בעמוד הנוכחי או בכל העמודים. "
+        self.stamp_btn = self._menu_btn("חותמות", "חותמת לוחות ריקה וחותמות שהוספתם — בעמוד הנוכחי או בכל העמודים. "
                                                   "הגודל מותאם לכתב שבשרטוט, והמקום נבחר כך שלא יסתיר טקסט או קווים",
                                         sm, checkable=True)
         self.stamp_btn.installEventFilter(self)
@@ -2565,30 +2565,41 @@ class MainWindow(QMainWindow):
         for slot in stamps.FIXED + stamps.CUSTOM:
             if not stamps.has(slot):
                 continue
-            title = stamps.name(slot) + ("  (עם תאריך)" if stamps.date_pos(slot) else "")
+            title = stamps.name(slot)
             m = QMenu(title, sm)
             m.setLayoutDirection(Qt.RightToLeft)
             m.menuAction().setText(title)
             m.menuAction().setToolTip(title)
             sm.addMenu(m)
-            for color, cname in (("#d0021b", "אדום"), ("#000000", "שחור")):
-                for where, wname in (("page", "בעמוד הנוכחי"), ("all", "בכל העמודים")):
-                    self._act(m, f"{cname} – {wname}",
-                              lambda s_=slot, c_=color, w_=where: self._add_stamp(s_, c_, w_),
-                              "מקליקים על השרטוט במקום החותמת" + (
-                                  ". בשאר העמודים היא תונח במקום פנוי מטקסט, קרוב לאותו מקום" if where == "all" else ""))
+
+            def fill(menu, with_date, slot=slot):
+                for color, cname in (("#000000", "שחור"), ("#d0021b", "אדום")):
+                    for where, wname in (("page", "בעמוד הנוכחי"), ("all", "בכל העמודים")):
+                        self._act(menu, f"{cname} – {wname}",
+                                  lambda s_=slot, c_=color, w_=where, d_=with_date: self._add_stamp(s_, c_, w_, d_),
+                                  "מקליקים על השרטוט במקום החותמת" + (
+                                      ". בשאר העמודים היא תונח במקום שלא מסתיר טקסט או שרטוט" if where == "all" else ""))
+            if stamps.date_pos(slot):
+                # חותמת עם שדה תאריך: בוחרים אם להשאיר אותו ריק או לכתוב את התאריך של היום
+                for with_date, dname in ((False, "בלי תאריך"), (True, "עם התאריך של היום")):
+                    dm = QMenu(dname, m)
+                    dm.setLayoutDirection(Qt.RightToLeft)
+                    m.addMenu(dm)
+                    fill(dm, with_date)
+            else:
+                fill(m, False)
             if slot in stamps.CUSTOM:
                 m.addSeparator()
                 self._act(m, "הסרת החותמת", lambda s_=slot: self._remove_stamp(s_))
         sm.addSeparator()
         a = self._act(sm, "הוספת חותמת נוספת...", self._new_stamp,
-                      "מתמונה (PNG/JPG) או מקובץ PDF, עם שם שנשמר עד שמסירים אותה. עד 2 חותמות נוספות")
+                      "מתמונה (PNG/JPG) או מקובץ PDF, עם שם שנשמר עד שמסירים אותה. עד 3 חותמות נוספות.\nהחותמת נשמרת רק במחשב הזה — מתאים לחותמת עם חתימה")
         a.setEnabled(stamps.free_custom_slot() is not None)
 
     def _new_stamp(self):
         slot = stamps.free_custom_slot()
         if slot is None:
-            QMessageBox.information(self, APP_NAME, "כבר יש 2 חותמות נוספות. כדי להוסיף, קודם מסירים אחת מהן.")
+            QMessageBox.information(self, APP_NAME, "כבר יש 3 חותמות נוספות. כדי להוסיף, קודם מסירים אחת מהן.")
             return
         d = self.settings.value("stamp_dir", self.settings.value("last_dir", ""))
         path, _ = QFileDialog.getOpenFileName(self, "קובץ החותמת", d,
@@ -2624,7 +2635,7 @@ class MainWindow(QMainWindow):
         self._fill_stamp_menu()
         self.statusBar().showMessage(f"החותמת \"{nm}\" הוסרה", 5000)
 
-    def _add_stamp(self, slot, color, where):
+    def _add_stamp(self, slot, color, where, with_date=False):
         if not self._need_doc():
             return
         v = self.view
@@ -2637,7 +2648,7 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         tpl = {"slot": slot, "w": w, "ar": stamps.aspect(slot), "color": color}
-        dp = stamps.date_pos(slot)
+        dp = stamps.date_pos(slot) if with_date else None
         if dp:
             from datetime import date
             tpl["date"] = date.today().strftime("%d/%m/%Y")
