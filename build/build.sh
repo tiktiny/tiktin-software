@@ -2,7 +2,7 @@
 # בניית קובץ ההתקנה של טיקטין PDF ל-Windows (רץ ב-GitHub Actions על Linux)
 set -euo pipefail
 ROOT="$(pwd)"
-VER="$(sed -n 1p VERSION)"; DATE="$(sed -n 2p VERSION)"
+VER="$(sed -n 1p VERSION)"; DATE="$(sed -n 2p VERSION)"; LETTER="${VER:0:1}"; VNUM="${VER:1}"
 sudo apt-get update -qq && sudo apt-get install -y -qq nsis >/dev/null
 python -m pip install -q pillow
 curl -sL -o mm https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-linux-64
@@ -14,20 +14,16 @@ python -m pip install -q --no-deps --only-binary=:all: --platform win_amd64 --py
 python build/trim.py "$ROOT/winpy"
 curl -sL -o logo.png https://raw.githubusercontent.com/tiktiny/tiktin-tools/main/tiktin-logo.png
 mkdir -p "$ROOT/winpy/app" "$ROOT/out"
-python build/make_assets.py logo.png "$VER" "$DATE" "$ROOT/winpy/app/version.py" "$ROOT/out/tiktin_pdf.ico" A
+python build/make_assets.py logo.png "$VER" "$DATE" "$ROOT/winpy/app/version.py" "$ROOT/out/tiktin_pdf.ico" "$LETTER"
+# אייקון לתוכנת "חותמת לוחות אוטומטית" (אותו אייקון, עם האות ח)
+python build/make_assets.py logo.png "$VER" "$DATE" "$ROOT/out/_unused_version.py" "$ROOT/out/tiktin_stamp.ico" "ח"
+rm -f "$ROOT/out/_unused_version.py"
 cp src/*.py "$ROOT/winpy/app/"
-cp -r src/fonts "$ROOT/winpy/app/"
 python -m compileall -q "$ROOT/winpy/app"
 cd build
-makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" launcher.nsi
-makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" installer.nsi
-# גרסה B (ממשק חדש): אותו קוד, עם הקובץ new_ui.flag שמפעיל את הממשק החדש
-touch "$ROOT/winpy/app/new_ui.flag"
-cd "$ROOT"
-python build/make_assets.py logo.png "$VER" "$DATE" "$ROOT/winpy/app/version.py" "$ROOT/out/tiktin_pdf_b.ico" B
-python -m compileall -q "$ROOT/winpy/app"
-cd build
-makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVARIANT_B launcher.nsi
-makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVARIANT_B installer.nsi
-rm -f "$ROOT/winpy/app/new_ui.flag"
+makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVNUM="$VNUM" launcher.nsi
+makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVNUM="$VNUM" launcher_stamp.nsi
+makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVNUM="$VNUM" installer.nsi
+# תוכנה נפרדת, עם קובץ התקנה משלה: חותמת אוטומטית
+makensis -V2 -DROOT="$ROOT" -DVERSION="$VER" -DVNUM="$VNUM" installer_stamp.nsi
 ls -la "$ROOT/out"
