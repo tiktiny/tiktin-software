@@ -1,7 +1,7 @@
 # כפתור צבע עם תפריט צבעים קבוע (עברית, בלי חלון צבעים באנגלית)
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QColor, QIcon, QPainter
-from PySide6.QtWidgets import QToolButton, QMenu
+from PySide6.QtWidgets import QToolButton
 
 PALETTE = [("#d0021b", "אדום"), ("#000000", "שחור")]
 
@@ -38,7 +38,7 @@ class ColorButton(QToolButton):
         if c not in dict(PALETTE):
             c = "#d0021b"
         self.color = c
-        self.setIcon(swatch(c))
-        self.setText(dict(PALETTE)[c])
+        self.setIcon(swatch(c, 24, 24))
+        self.setText(getattr(self, "fixed_text", None) or dict(PALETTE)[c])
         if emit:
             self.changed.emit(c)

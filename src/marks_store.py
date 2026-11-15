@@ -4,7 +4,7 @@
 # בפתיחה בטיקטין PDF השכבה הצרובה מוסתרת והסימונים נטענים מחדש לעריכה.
 import json
 import base64
-import hashlib
+import zlib
 
 import annotations as A
 
@@ -141,7 +141,7 @@ def save(doc, items, scales):
                 if it["type"] == "stamp":
                     png = stamps.mask_png(it["slot"])
                     if png:
-                        key = "f" + hashlib.md5(png).hexdigest()[:16]
+                        key = "f%08x%06x" % (zlib.crc32(png) & 0xffffffff, len(png))
                         stamp_data[key] = base64.b64encode(png).decode()
                         it["slot"] = key
                 saved.append(it)

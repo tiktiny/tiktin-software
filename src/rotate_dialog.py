@@ -1,24 +1,6 @@
-# חלון סיבוב עמודים (Ctrl+R): אילו עמודים, איזו פעולה, ולאיזה כיוון
+# חלון סיבוב עמודים: עמוד נוכחי או כל העמודים, עם/נגד כיוון השעון, או מצב סופי לאורך/לרוחב
 from PySide6.QtCore import Qt, QSettings
-
-
-def deg(n):
-    """מספר מעלות שמוצג נכון בתוך טקסט עברי (בלי שהסימן ° יקפוץ לצד השני)."""
-    return "\u202a" + f"{n}°" + "\u202c"
-
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-                               QPushButton, QButtonGroup, QWidget)
-
-ACTIONS = [("rot90", "סיבוב " + deg(90)), ("portrait", "לאורך"), ("landscape", "לרוחב"),
-           ("upright", "טקסט ישר"), ("flip", "היפוך " + deg(180))]
-
-HINTS = {
-    "rot90": "מסובב כל עמוד ב־90 מעלות לכיוון שנבחר.",
-    "portrait": "כל עמוד יהיה לאורך, והטקסט בו לא יהיה הפוך.",
-    "landscape": "כל עמוד יהיה לרוחב, והטקסט בו לא יהיה הפוך.",
-    "upright": "כל עמוד מסובב כך שרוב הטקסט בו ישר וקריא. עמוד בלי טקסט (סריקה) לא זז.",
-    "flip": "הופך כל עמוד ב־180 מעלות – לשרטוט שנפתח הפוך.",
-}
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QButtonGroup, QWidget)
 
 
 class RotateDialog(QDialog):
@@ -30,44 +12,59 @@ class RotateDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 18, 20, 18)
         lay.setSpacing(14)
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(12)
-        lay.addLayout(grid)
+        self.groups = {}
 
-        def seg_row(r, title, items, saved):
-            grp = QButtonGroup(self)
-            w = QWidget()
-            h = QHBoxLayout(w)
+        def seg(key, label, opts, cur):
+            row = QHBoxLayout()
+            lab = QLabel(label)
+            lab.setMinimumWidth(80)
+            row.addWidget(lab)
+            box = QWidget()
+            h = QHBoxLayout(box)
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(0)
-            for i, (key, text) in enumerate(items):
+            grp = QButtonGroup(self)
+            for k, (val, text, tip) in enumerate(opts):
                 b = QPushButton(text)
                 b.setObjectName("seg")
                 b.setCheckable(True)
-                b.setProperty("key", key)
-                b.setMinimumWidth(96)
-                grp.addButton(b, i)
+                b.setProperty("key", val)
+                b.setToolTip(tip)
+                b.setMinimumWidth(90)
+                grp.addButton(b, k)
                 h.addWidget(b)
-            h.addStretch(1)
-            keys = [k for k, _ in items]
-            grp.button(keys.index(saved) if saved in keys else 0).setChecked(True)
-            grid.addWidget(QLabel(title), r, 0)
-            grid.addWidget(w, r, 1)
+                if val == cur:
+                    b.setChecked(True)
+            if grp.checkedButton() is None:
+                grp.buttons()[0].setChecked(True)
+            row.addWidget(box)
+            row.addStretch(1)
+            lay.addLayout(row)
+            self.groups[key] = grp
             return grp
 
-        self.scope = seg_row(0, "עמודים", [("page", f"העמוד הנוכחי ({cur_page + 1})"),
-                                           ("all", f"כל העמודים ({n_pages})")],
-                             st.value("rot_scope", "page"))
-        self.action = seg_row(1, "פעולה", ACTIONS, st.value("rot_action", "rot90"))
-        self.direction = seg_row(2, "כיוון", [("cw", "↻  עם כיוון השעון"), ("ccw", "↺  נגד כיוון השעון")],
-                                 st.value("rot_dir", "cw"))
-        self.hint = QLabel("")
-        self.hint.setStyleSheet("color: #5c6367;")
-        self.hint.setWordWrap(True)
-        grid.addWidget(self.hint, 3, 1)
-        grid.setColumnStretch(1, 1)
-
+        seg("scope", "עמודים", [("page", f"העמוד הנוכחי ({cur_page})", "רק העמוד שמוצג עכשיו"),
+                                ("all", f"כל העמודים ({n_pages})", "כל העמודים בקובץ")],
+            st.value("rot_scope", "page"))
+        seg("mode", "פעולה", [("rot", "סיבוב 90°", "מסובב רבע סיבוב בכיוון שנבחר"),
+                              ("portrait", "לאורך", "העמוד יעמוד לאורך, והטקסט בשרטוט ישר וקריא"),
+                              ("landscape", "לרוחב", "העמוד יעמוד לרוחב, והטקסט בשרטוט ישר וקריא"),
+                              ("upright", "טקסט ישר", "מסובב כל עמוד כך שהטקסט בו יעמוד ישר וקריא"),
+                              ("180", "היפוך 180°", "הופך עמוד שעומד הפוך")],
+            st.value("rot_mode", "rot"))
+        seg("dir", "כיוון", [("cw", "↻ עם כיוון השעון", "סיבוב ימינה"),
+                             ("ccw", "↺ נגד כיוון השעון", "סיבוב שמאלה")],
+            st.value("rot_dir", "cw"))
+        if n_pages < 2:
+            self.groups["scope"].buttons()[1].setEnabled(False)
+            self.groups["scope"].buttons()[0].setChecked(True)
+        tip = QLabel("לאורך, לרוחב וטקסט ישר: התוכנה בודקת את הטקסט בכל עמוד ומסובבת כך שהוא לא יהיה הפוך. "
+                     "בעמודים בלי טקסט (למשל סריקה) אי אפשר לזהות מה ישר — התוכנה תודיע על כך.\n"
+                     "הסימונים מסתובבים יחד עם השרטוט. הקובץ עצמו משתנה רק ב\"שמירת שינויים\", ו־UNDO מחזיר.")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:#5b6470;")
+        tip.setAlignment(Qt.AlignAbsolute | Qt.AlignRight)
+        lay.addWidget(tip)
         btns = QHBoxLayout()
         btns.addStretch(1)
         cancel = QPushButton("ביטול")
@@ -80,28 +77,12 @@ class RotateDialog(QDialog):
         lay.addLayout(btns)
         cancel.clicked.connect(self.reject)
         ok.clicked.connect(self._ok)
-        self.action.buttonToggled.connect(self._refresh)
-        self._refresh()
-
-    @staticmethod
-    def _key(grp):
-        return grp.checkedButton().property("key")
-
-    def _refresh(self, *_):
-        a = self._key(self.action)
-        # הכיוון קובע בסיבוב 90°, ובלאורך / לרוחב רק לעמודים בלי טקסט
-        on = a in ("rot90", "portrait", "landscape")
-        for b in self.direction.buttons():
-            b.setEnabled(on)
-        extra = " הכיוון שנבחר משמש רק לעמודים בלי טקסט." if a in ("portrait", "landscape") else ""
-        self.hint.setText(HINTS[a] + extra)
 
     def _ok(self):
-        self.result_scope = self._key(self.scope)
-        self.result_action = self._key(self.action)
-        self.result_dir = self._key(self.direction)
+        g = {k: v.checkedButton().property("key") for k, v in self.groups.items()}
         st = QSettings("Tiktin", "TiktinPDF")
-        st.setValue("rot_scope", self.result_scope)
-        st.setValue("rot_action", self.result_action)
-        st.setValue("rot_dir", self.result_dir)
+        st.setValue("rot_scope", g["scope"])
+        st.setValue("rot_mode", g["mode"])
+        st.setValue("rot_dir", g["dir"])
+        self.scope, self.mode, self.cw = g["scope"], g["mode"], g["dir"] == "cw"
         self.accept()

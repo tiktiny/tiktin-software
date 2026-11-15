@@ -2,13 +2,12 @@
 # כל הקואורדינטות בנקודות PDF של העמוד (כפי שהוא מוצג), המידות בס"מ אמיתיים לפי קנ"מ.
 import math
 from PySide6.QtCore import Qt, QPointF, QRectF
-from PySide6.QtGui import QPen, QColor, QFont, QPainterPath, QPolygonF, QBrush
-from ui_variant import NEW_UI
+from PySide6.QtGui import QPen, QColor, QFont, QPainterPath, QPolygonF
 
 PT_PER_MM = 72.0 / 25.4
 HOLE_COLOR = "#d0021b"
 DIM_COLOR = "#0057b8"
-SEL_COLOR = "#24282b" if NEW_UI else "#ff8a00"
+SEL_COLOR = "#ff8a00"
 LABEL_PT = 7.0            # גובה טקסט על הנייר (כ-2.5 מ"מ)
 PRINT_LINE_PT = 0.8       # עובי קו בהדפסה ובשמירה
 KIND_NAME = {"floor": "חור ברצפה", "ceil": "חור בתקרה", "wall": "חור בקיר"}
@@ -109,14 +108,23 @@ def label_text(it, S):
 _FONT = None
 
 
+_PATH_CACHE = {}
+
+
 def _text_path(text):
+    """קווי המתאר של הטקסט. נשמר בזיכרון — יצירה מחדש בכל ציור האטה מאוד שרטוטים עם הרבה סימונים."""
     global _FONT
-    if _FONT is None:
-        _FONT = QFont("Arial")
-        _FONT.setPixelSize(100)
-    path = QPainterPath()
-    path.addText(0, 0, _FONT, text)
-    return path
+    p = _PATH_CACHE.get(text)
+    if p is None:
+        if _FONT is None:
+            _FONT = QFont("Arial")
+            _FONT.setPixelSize(100)
+        p = QPainterPath()
+        p.addText(0, 0, _FONT, text)
+        if len(_PATH_CACHE) > 4000:
+            _PATH_CACHE.clear()
+        _PATH_CACHE[text] = p
+    return p
 
 
 def label_rect(it, S):

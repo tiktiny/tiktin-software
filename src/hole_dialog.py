@@ -1,8 +1,8 @@
 # חלון הגדרת מידות חור (רצפה / תקרה / קיר)
 from PySide6.QtCore import Qt, QTimer, QSettings
 from PySide6.QtGui import QDoubleValidator
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-                               QLineEdit, QPushButton, QButtonGroup, QWidget)
+from PySide6.QtWidgets import (QComboBox, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
+                               QLineEdit, QPushButton)
 from annotations import KIND_NAME
 
 DEFAULTS = {
@@ -59,26 +59,17 @@ class HoleDialog(QDialog):
         lay.setContentsMargins(20, 18, 20, 18)
         lay.setSpacing(14)
 
-        seg = QWidget()
-        h = QHBoxLayout(seg)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(0)
-        self.shape_grp = QButtonGroup(self)
-        for i, (key, text) in enumerate((("rect", "מלבני"), ("square", "מרובע"), ("round", "עגול"))):
-            b = QPushButton(text)
-            b.setObjectName("seg")
-            b.setCheckable(True)
-            b.setProperty("key", key)
-            b.setMinimumWidth(100)
-            self.shape_grp.addButton(b, i)
-            h.addWidget(b)
-            if key == base["shape"]:
-                b.setChecked(True)
-        h.addStretch(1)
+        # צורה: תפריט נפתח (לא כרטיסיות)
+        self.shape_box = QComboBox()
+        for key, text in (("rect", "מלבני"), ("square", "מרובע"), ("round", "עגול")):
+            self.shape_box.addItem(text, key)
+        self.shape_box.setCurrentIndex(max(0, self.shape_box.findData(base["shape"])))
+        self.shape_box.setMinimumWidth(140)
         row = QHBoxLayout()
         row.addWidget(QLabel("צורה"))
         row.addSpacing(10)
-        row.addWidget(seg, 1)
+        row.addWidget(self.shape_box)
+        row.addStretch(1)
         lay.addLayout(row)
 
         self.grid = QGridLayout()
@@ -121,11 +112,11 @@ class HoleDialog(QDialog):
         lay.addLayout(btns)
         cancel.clicked.connect(self.reject)
         ok.clicked.connect(self._ok)
-        self.shape_grp.buttonToggled.connect(self._refresh)
+        self.shape_box.currentIndexChanged.connect(lambda *_: self._refresh())
         self._refresh()
 
     def shape(self):
-        return self.shape_grp.checkedButton().property("key")
+        return self.shape_box.currentData()
 
     def _refresh(self, *_):
         rnd = self.shape() == "round"
