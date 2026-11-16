@@ -90,6 +90,12 @@ def _draw(name, pp):
         pp.cubicTo(9.3, 6.5, 14.7, 6.5, 14.7, 9.5)
         pp.cubicTo(14.7, 11.5, 12, 11.5, 12, 13.8)
         L((12, 16.8), (12, 17))
+    elif name == "leaf":
+        pp.moveTo(5, 19)
+        pp.cubicTo(5, 9, 11, 4, 20, 4)
+        pp.cubicTo(20, 13, 15, 19, 5, 19)
+        L((5, 19), (13, 11))
+        L((3, 21), (5, 19))
     elif name == "home":
         L((3, 11), (12, 3), (21, 11))
         L((5, 9.5), (5, 21), (19, 21), (19, 9.5))
@@ -152,7 +158,7 @@ QLabel#apptitle { color: #1f2328; font-size: 14pt; font-weight: 700; }
 QLabel#filename { color: #5f6670; font-size: 10.5pt; }
 QLabel#hver { color: #5f6670; font-size: 9.5pt; }
 QToolButton#rb, QToolButton#rbmain { color: #1f2328; background: transparent; border: 1px solid transparent;
-    border-radius: 8px; padding: 4px 5px 4px 5px; min-height: 58px; max-height: 58px; min-width: 40px; font-size: 9.5pt; }
+    border-radius: 8px; padding: 4px 3px 4px 3px; min-height: 58px; max-height: 58px; min-width: 38px; font-size: 9.5pt; }
 QToolButton#rb:hover { background: #f4f5f7; border-color: #d5d9de; }
 QToolButton#rb::menu-indicator, QToolButton#rbmain::menu-indicator { image: none; width: 0; }
 QToolButton#rb::menu-button { border: none; border-right: 1px solid #d5d9de; width: 14px; }

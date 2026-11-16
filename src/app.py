@@ -2335,9 +2335,40 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def _green_web(self):
+        """תקן ירוק — פתיחת האפליקציה בדפדפן עם הטופס הפתוח. נטען רק בלחיצה (לא מאט את התוכנה)."""
+        v = self.view
+        if not v.sizes or not v.path:
+            QMessageBox.information(self, "תקן ירוק", "קודם פותחים את טופס ההצהרה שהיועץ שלח.")
+            return
+        import green_web
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        try:
+            with open(v.path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            QMessageBox.warning(self, "תקן ירוק", "לא ניתן לקרוא את הקובץ הפתוח.")
+            return
+        if v.dirty:
+            self.statusBar().showMessage("שים לב: נשלח הקובץ כפי שהוא שמור בדיסק, בלי השינויים שעוד לא נשמרו", 8000)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            err = green_web.update_files()
+            url = None if err else green_web.serve(data, os.path.basename(v.path))
+        except Exception:
+            err, url = "לא ניתן להפעיל את אפליקציית התקן הירוק.", None
+        finally:
+            QApplication.restoreOverrideCursor()
+        if err:
+            QMessageBox.warning(self, "תקן ירוק", err)
+            return
+        QDesktopServices.openUrl(QUrl(url))
+        self.statusBar().showMessage("אפליקציית התקן הירוק נפתחה בדפדפן עם הטופס", 6000)
+
     ICONS = {"פתיחה": "open", "קובץ": "file", "הדפסה": "print", "העתקה": "copy", "הוסף": "add", "חותמות": "stamp",
-             "מחיקה מהשרטוט": "erase", "סיבוב": "rotate", "תצוגה": "view", "שמירת\nשינויים": "save"}
-    LABELS = {"מחיקה מהשרטוט": "מחיקה\nמהשרטוט"}
+             "מחיקה מהשרטוט": "erase", "סיבוב": "rotate", "תצוגה": "view", "תקן ירוק": "leaf", "שמירת\nשינויים": "save"}
+    LABELS = {"מחיקה מהשרטוט": "מחיקה\nמהשרטוט", "תקן ירוק": "תקן\nירוק"}
 
     def _btn(self, text, tip, slot, primary=False, checkable=False, icon=None):
         b = RibbonButton(self.LABELS.get(text, text), tip, icon or self.ICONS.get(text), main=primary)
@@ -2637,6 +2668,11 @@ class MainWindow(QMainWindow):
         self._act(vm, "מסך מלא", self._toggle_full, shortcut="F11")
         vm.addSeparator()
         self._act(vm, "הוראות הפעלה", self.show_help, shortcut="F1")
+        gm = self._menu(self)
+        self._act(gm, "פתיחה באפליקציית התקן הירוק", self._green_web,
+                  "פותח את אפליקציית \"מילוי אוטומטי של תקן ירוק\" בדפדפן, כשהטופס הפתוח כבר טעון בה")
+        self.green_btn = self._menu_btn("תקן ירוק", "מילוי הצהרת חשמל לתקן בנייה ירוקה (ת\"י 5281) על הטופס הפתוח", gm)
+        tb.addWidget(self.green_btn)
         tb.addSeparator()
         tb.addWidget(self._menu_btn("תצוגה", "התאמה לרוחב, 100%, מצב גלגלת ומסך מלא", vm))
         tb.addWidget(self._btn("מסך מלא", "השרטוט על כל המסך, בלי הסרגלים (F11). Esc או F11 חוזרים", self._toggle_full,
