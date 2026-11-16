@@ -14,7 +14,7 @@ PORT = 51287          # פורט קבוע: כך החותמת שנשמרה בדפ
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
          ".mjs": "text/javascript; charset=utf-8", ".pdf": "application/pdf"}
 
-_state = {"server": None, "pdf": b"", "name": "", "port": None}
+_state = {"server": None, "pdf": b"", "name": "", "port": None, "src": "", "on_result": None}
 
 
 def cache_dir():
@@ -71,10 +71,25 @@ def update_files(progress=None):
 def _loader():
     import json
     name = json.dumps(_state["name"], ensure_ascii=False)
+    stem = json.dumps(os.path.splitext(_state["name"])[0], ensure_ascii=False)
     return ("<script type=\"module\">\n"
             "/* טיקטין PDF: הטופס הפתוח נטען אוטומטית */\n"
             "const r = await fetch('/__form.pdf?' + Date.now()); const b = new Uint8Array(await r.arrayBuffer());\n"
             "const go = () => window.__green ? window.__green.loadBytes(b, " + name + ") : setTimeout(go, 80); go();\n"
+            "/* ייצוא PDF: הטופס הממולא והחתום חוזר לטיקטין PDF (נשמר ליד המקורי ונפתח בלשונית חדשה) */\n"
+            "const dl = document.getElementById('dl');\n"
+            "if (dl) { const sp = dl.querySelector('span'); if (sp) sp.textContent = 'שמירה ופתיחה בטיקטין PDF';\n"
+            " dl.title = 'הטופס הממולא נשמר ליד הקובץ המקורי ונפתח בטיקטין PDF בלשונית חדשה';\n"
+            " const note = (t, bad) => { let n = document.getElementById('__tkn'); if (!n) { n = document.createElement('div'); n.id = '__tkn';\n"
+            "   n.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:9999;padding:10px 16px;border-radius:8px;color:#fff;font:15px Rubik,Arial;max-width:70vw'; document.body.appendChild(n); }\n"
+            "   n.style.background = bad ? '#c8202f' : '#17364c'; n.textContent = t; n.style.display = 'block'; clearTimeout(n._t); n._t = setTimeout(() => n.style.display = 'none', 6000); };\n"
+            " dl.onclick = async () => { const o = window.__green.out(); if (!o) return;\n"
+            "  try { const r = await fetch('/__result', { method: 'POST', body: o });\n"
+            "   const j = await r.json(); if (!j.ok) throw new Error(j.err || '');\n"
+            "   note('נשמר ונפתח בטיקטין PDF: ' + j.name);\n"
+            "  } catch (e) { note('לא הצלחתי להחזיר לטיקטין PDF (התוכנה סגורה?) – הקובץ יורד כרגיל', true);\n"
+            "   const u = URL.createObjectURL(new Blob([o], { type: 'application/pdf' })); const a = document.createElement('a'); a.href = u;\n"
+            "   a.download = " + stem + " + ' - ממולא וחתום.pdf'; document.body.appendChild(a); a.click(); a.remove(); } }; }\n"
             "</script>\n")
 
 
@@ -107,14 +122,58 @@ class _H(http.server.BaseHTTPRequestHandler):
         self._send(data, TYPES.get(os.path.splitext(path)[1], "application/octet-stream"))
 
 
+    def do_POST(self):
+        import json
+        if self.path.split("?")[0] != "/__result":
+            self.send_error(404)
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            data = self.rfile.read(n) if 0 < n < 200 * 1024 * 1024 else b""
+            if not data.startswith(b"%PDF"):
+                raise ValueError("not a pdf")
+            path = save_result(data)
+            cb = _state["on_result"]
+            if cb:
+                cb(path)
+            ans = {"ok": True, "name": os.path.basename(path)}
+        except Exception as e:
+            ans = {"ok": False, "err": str(e)}
+        self._send(json.dumps(ans, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+
+def save_result(data):
+    """שומר את הטופס הממולא ליד הקובץ המקורי: "<שם> - ממולא וחתום.pdf".
+    אם הקובץ קיים ופתוח (נעול) — שם עם מספר; אם אין הרשאה לתיקייה — תיקיית המסמכים."""
+    src = _state["src"]
+    folder = os.path.dirname(src) if src else ""
+    stem = os.path.splitext(os.path.basename(src or _state["name"] or "טופס"))[0]
+    docs = os.path.join(os.path.expanduser("~"), "Documents")
+    for d in [f for f in (folder, docs, os.path.expanduser("~")) if f]:
+        for k in range(1, 30):
+            p = os.path.join(d, stem + " - ממולא וחתום" + ("" if k == 1 else " (%d)" % k) + ".pdf")
+            busy = _state.get("is_open")
+            if busy and busy(p):          # פתוח כבר בטיקטין PDF — לא דורסים, שם חדש
+                continue
+            try:
+                with open(p, "wb") as fh:
+                    fh.write(data)
+                return p
+            except OSError:
+                continue
+    raise OSError("לא ניתן לשמור את הקובץ")
+
+
 class _Srv(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
 
-def serve(pdf_bytes, name):
-    """מגיש את האפליקציה ואת הטופס במחשב המקומי בלבד (127.0.0.1). מחזיר את הכתובת לפתיחה בדפדפן."""
-    _state["pdf"], _state["name"] = pdf_bytes, name
+def serve(pdf_bytes, name, src_path="", on_result=None, is_open=None):
+    """מגיש את האפליקציה ואת הטופס במחשב המקומי בלבד (127.0.0.1). מחזיר את הכתובת לפתיחה בדפדפן.
+    on_result(path) נקרא כשהטופס הממולא חוזר (מתהליך הרשת — לקרוא ממנו רק לאות Qt)."""
+    _state["pdf"], _state["name"], _state["src"], _state["on_result"] = pdf_bytes, name, src_path, on_result
+    _state["is_open"] = is_open
     if _state["server"] is None:
         srv = None
         for port in (PORT, PORT + 1, PORT + 2, 0):

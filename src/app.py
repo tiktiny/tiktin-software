@@ -2355,7 +2355,9 @@ class MainWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             err = green_web.update_files()
-            url = None if err else green_web.serve(data, os.path.basename(v.path))
+            url = None if err else green_web.serve(data, os.path.basename(v.path), v.path,
+                                                     lambda p_: self.files_arrived.emit([p_]),
+                                                     lambda p_: self._find_tab(p_) >= 0)
         except Exception:
             err, url = "לא ניתן להפעיל את אפליקציית התקן הירוק.", None
         finally:
