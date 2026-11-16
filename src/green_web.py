@@ -24,6 +24,23 @@ def cache_dir():
     return d
 
 
+def _fetch(url):
+    """הורדה דרך curl.exe של Windows (מובנה ב-Windows 10/11, משתמש בתעודות ובפרוקסי של המחשב).
+    גיבוי: פייתון, אם יש בו תמיכה ב-HTTPS. (בחבילת התוכנה אין רכיב הצפנה של פייתון, כדי שתהיה קטנה.)"""
+    import subprocess
+    exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "curl.exe")
+    if os.name == "nt" and os.path.exists(exe):
+        try:
+            r = subprocess.run([exe, "-fsSL", "--retry", "2", "--connect-timeout", "15", "--max-time", "120", url],
+                               capture_output=True, timeout=150, creationflags=0x08000000)   # בלי חלון שחור
+            if r.returncode == 0 and r.stdout:
+                return r.stdout
+        except Exception:
+            pass
+    with urllib.request.urlopen(url, timeout=20) as r:
+        return r.read()
+
+
 def update_files(progress=None):
     """מוריד את קבצי האפליקציה לתיקייה מקומית. בלי אינטרנט — משתמש בעותק הקודם (אם יש).
     מחזיר None כשהכול מוכן, או הודעת שגיאה בעברית."""
@@ -34,8 +51,7 @@ def update_files(progress=None):
         if progress:
             progress(k, len(todo))
         try:
-            with urllib.request.urlopen(BASE + f, timeout=20) as r:
-                data = r.read()
+            data = _fetch(BASE + f)
             if len(data) < 50:
                 raise IOError("empty")
             tmp = os.path.join(d, f + ".tmp")
@@ -46,7 +62,8 @@ def update_files(progress=None):
             failed.append(f)
     missing = [f for f in SMALL + BIG if not os.path.exists(os.path.join(d, f))]
     if missing:
-        return ("לא ניתן להוריד את אפליקציית התקן הירוק (אין חיבור לאינטרנט?). "
+        return ("לא ניתן להוריד את אפליקציית התקן הירוק מהאינטרנט. "
+                "ייתכן שחומת אש או אנטי-וירוס חוסמים את raw.githubusercontent.com. "
                 "בפעם הראשונה צריך חיבור לאינטרנט — אחר כך היא עובדת גם בלי.")
     return None
 
