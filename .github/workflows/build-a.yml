@@ -23,3 +23,10 @@ jobs:
           VER=$(sed -n 1p VERSION)
           gh release delete "v$VER" -y --cleanup-tag || true
           gh release create "v$VER" out/TiktinPDF-Setup-A.exe out/TiktinStamp-Setup.exe --target version-a --title "Tiktin PDF $VER" --notes "Tiktin PDF $VER" --latest=false
+      - name: Update permanent download links (release "downloads")
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER=$(sed -n 1p VERSION)
+          gh release view downloads >/dev/null 2>&1 || gh release create downloads --target version-a --title "הורדות קבועות – תוכנות טיקטין" --notes "קישורים קבועים: תמיד הגרסה העדכנית של כל תוכנה" --latest=false
+          gh release upload downloads "out/TiktinPDF-Setup-A.exe#Tiktin PDF $VER" "out/TiktinStamp-Setup.exe#חותמת אוטומטית $VER" --clobber
