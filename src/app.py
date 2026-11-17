@@ -2153,12 +2153,52 @@ class PdfView(QAbstractScrollArea):
             super().keyPressEvent(ev)
 
 
+# ---------------------------------------------------------------- tab bar
+class DocTabBar(QTabBar):
+    """כרטיסיות הקבצים. גרירת כרטיסייה החוצה (למעלה/למטה) פותחת אותה בחלון נפרד;
+    גרירה מחלון אחד אל שורת הכרטיסיות של חלון אחר מעבירה אותה לשם. קליק ימני: תפריט."""
+    tear_off = Signal(int)
+    TEAR = 45                      # כמה פיקסלים מחוץ לשורה עד שהכרטיסייה "נתלשת"
+
+    def __init__(self):
+        super().__init__()
+        self._press = -1
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+
+    def mousePressEvent(self, ev):
+        self._press = self.tabAt(ev.position().toPoint()) if ev.button() == Qt.LeftButton else -1
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if self._press >= 0 and ev.buttons() & Qt.LeftButton:
+            y = ev.position().y()
+            if y < -self.TEAR or y > self.height() + self.TEAR:
+                i = self._press
+                self._press = -1
+                # מסיימים את הגרירה הפנימית של Qt לפני שמוציאים את הכרטיסייה
+                from PySide6.QtGui import QMouseEvent
+                rel = QMouseEvent(QMouseEvent.MouseButtonRelease, ev.position(), ev.globalPosition(),
+                                  Qt.LeftButton, Qt.NoButton, ev.modifiers())
+                super().mouseReleaseEvent(rel)
+                QTimer.singleShot(0, lambda i=i: self.tear_off.emit(i))
+                return
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        self._press = -1
+        super().mouseReleaseEvent(ev)
+
+
 # ---------------------------------------------------------------- main window
 class MainWindow(QMainWindow):
     files_arrived = Signal(list)      # קבצים שנשלחו מהפעלה נוספת של התוכנה
 
-    def __init__(self, pool):
+    def __init__(self, pool, secondary=False):
         super().__init__()
+        self.secondary = secondary          # חלון נוסף שנוצר מגרירת כרטיסייה החוצה
+        if secondary:
+            self.setAttribute(Qt.WA_DeleteOnClose)
+        self.split_v = None                 # הקובץ שמוצג בצד השני של התצוגה המפוצלת
         self.settings = QSettings("Tiktin", "TiktinPDF")
         self.setWindowTitle(f"{APP_NAME}   |   גרסה {VERSION} ({BUILD_DATE})")
         self.setAcceptDrops(True)
@@ -2167,7 +2207,7 @@ class MainWindow(QMainWindow):
         self._views = []
         self._cur = 0
         self._recent = []
-        self.tabbar = QTabBar()
+        self.tabbar = DocTabBar()
         self.tabbar.setObjectName("doctabs")
         self.tabbar.setTabsClosable(True)
         self.tabbar.setMovable(True)
@@ -2178,21 +2218,34 @@ class MainWindow(QMainWindow):
         self.tabbar.setFocusPolicy(Qt.NoFocus)
         self.tabbar.hide()
         self.stack = QStackedWidget()
+        # תצוגה מפוצלת: שני קבצים זה לצד זה. הצד השני מוסתר עד שמפעילים אותה
+        from PySide6.QtWidgets import QSplitter
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(6)
+        self.pane2 = QWidget()
+        self.pane2_lay = QVBoxLayout(self.pane2)
+        self.pane2_lay.setContentsMargins(0, 0, 0, 0)
+        self.splitter.addWidget(self.stack)
+        self.splitter.addWidget(self.pane2)
+        self.pane2.hide()
         cw = QWidget()
         cl = QVBoxLayout(cw)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
         cl.addWidget(self.tabbar)
-        cl.addWidget(self.stack, 1)
+        cl.addWidget(self.splitter, 1)
         self.setCentralWidget(cw)
         self._new_view()
         self.tabbar.currentChanged.connect(self._tab_switched)
         self.tabbar.tabCloseRequested.connect(self.close_tab)
         self.tabbar.tabMoved.connect(self._tab_moved)
+        self.tabbar.tear_off.connect(self.detach_tab)
+        self.tabbar.customContextMenuRequested.connect(self._tab_menu)
         self._build_toolbar()
         self.files_arrived.connect(self.open_files)
         self.view.wheel_zoom = False
-        g = self.settings.value("geometry")
+        g = None if secondary else self.settings.value("geometry")
         if g is not None:
             self.restoreGeometry(g)
         else:
@@ -2207,8 +2260,13 @@ class MainWindow(QMainWindow):
     def tray(self):
         return self.view.tray
 
-    def _new_view(self):
-        v = PdfView(self.pool)
+    SIGS = ("page_changed", "zoom_changed", "tool_changed", "changed", "status", "region_selected",
+            "select_cancelled", "scale_changed")
+
+    def _wire(self, v):
+        """מחבר כרטיסייה לחלון הזה (גם כרטיסייה שהגיעה מחלון אחר)."""
+        v.installEventFilter(self)
+        v.viewport().installEventFilter(self)
         cur = lambda fn: (lambda *a, v=v: fn(*a) if v is self.view else None)     # noqa: E731
         v.page_changed.connect(cur(self._on_page))
         v.zoom_changed.connect(cur(self._on_zoom))
@@ -2218,8 +2276,26 @@ class MainWindow(QMainWindow):
         v.region_selected.connect(cur(self._region))
         v.select_cancelled.connect(cur(lambda: self.statusBar().clearMessage()))
         v.scale_changed.connect(cur(self._show_scale))
+        v.tray.message.connect(lambda m, v=v: self.statusBar().showMessage(m, 7000) if v in self._views else None)
+
+    def _unwire(self, v):
+        for name in self.SIGS:
+            try:
+                getattr(v, name).disconnect()
+            except (RuntimeError, TypeError):
+                pass
+        try:
+            v.tray.message.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        v.removeEventFilter(self)
+        v.viewport().removeEventFilter(self)
+
+
+    def _new_view(self):
+        v = PdfView(self.pool)
         v.tray = ClipTray(v)
-        v.tray.message.connect(lambda m: self.statusBar().showMessage(m, 7000))
+        self._wire(v)
         if self._views:
             for k in ("pen_color", "pen_width", "text_size", "wheel_zoom"):
                 if hasattr(self.view, k):
@@ -2260,12 +2336,14 @@ class MainWindow(QMainWindow):
                 old.set_tool("pan")
         self._cur = i
         v = self.view
-        self.stack.setCurrentWidget(v)
-        # זיכרון: שומרים תמונות עמודים רק לשתי הכרטיסיות האחרונות שהוצגו
+        if v is not self.split_v:
+            self.stack.setCurrentWidget(v)
+        # זיכרון: שומרים תמונות עמודים רק לשתי הכרטיסיות האחרונות שהוצגו (ולצד השני של המסך המפוצל)
         self._recent = [x for x in self._recent if x is not v and x in self._views][-1:] + [v]
         for x in self._views:
-            if x not in self._recent:
+            if x not in self._recent and x is not self.split_v and x is not self.stack.currentWidget():
                 x.drop_tiles()
+        self._mark_active()
         self._sync_current()
         v.setFocus()
         v._schedule()
@@ -2299,6 +2377,8 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             return False
         v = self._views[i]
+        if v is self.split_v:
+            self._split_off()
         try:
             v.analyzer.shutdown()
         except Exception:
@@ -2317,6 +2397,216 @@ class MainWindow(QMainWindow):
         self.tabbar.blockSignals(False)
         self._tab_switched(self._cur)
         return True
+
+    # ----- חלונות נפרדים ותצוגה מפוצלת
+    def _take_view(self, i):
+        """מוציא כרטיסייה מהחלון בלי לסגור אותה (כדי להעביר אותה לחלון אחר)."""
+        v = self._views[i]
+        if v is self.split_v:
+            self._split_off()
+        if v.tool != "pan":
+            v.set_tool("pan")
+        if len(self._views) == 1:
+            self._new_view()
+        self._unwire(v)
+        self.tabbar.blockSignals(True)
+        self._views.pop(i)
+        self.tabbar.removeTab(i)
+        self.stack.removeWidget(v)
+        v.setParent(None)
+        self._recent = [x for x in self._recent if x is not v]
+        self._cur = min(i, len(self._views) - 1)
+        self.tabbar.setCurrentIndex(self._cur)
+        self.tabbar.blockSignals(False)
+        self._tab_switched(self._cur)
+        return v
+
+    def _put_view(self, v):
+        """מקבל כרטיסייה מחלון אחר ומציג אותה."""
+        if len(self._views) == 1 and not self._views[0].sizes:
+            # חלון ריק: הכרטיסייה הריקה מתחלפת בזו שהגיעה
+            e = self._views.pop(0)
+            self._unwire(e)
+            self.tabbar.blockSignals(True)
+            self.tabbar.removeTab(0)
+            self.tabbar.blockSignals(False)
+            self.stack.removeWidget(e)
+            try:
+                e.analyzer.shutdown()
+            except Exception:
+                pass
+            e.setParent(None)
+            e.deleteLater()
+            self._recent = []
+        self._wire(v)
+        self._views.append(v)
+        self.stack.addWidget(v)
+        self.tabbar.blockSignals(True)
+        self.tabbar.addTab("")
+        self.tabbar.blockSignals(False)
+        self._tab_title(v)
+        k = len(self._views) - 1
+        self.tabbar.setCurrentIndex(k)
+        self._tab_switched(k)
+        v.show()
+        QTimer.singleShot(0, lambda: (v._schedule(), v.viewport().update()))
+
+    @staticmethod
+    def _windows():
+        return [w for w in QApplication.topLevelWidgets() if isinstance(w, MainWindow) and w.isVisible()]
+
+    def detach_tab(self, i):
+        """גרירת כרטיסייה החוצה: מעל שורת הכרטיסיות של חלון אחר — עוברת אליו; אחרת — חלון חדש."""
+        if i < 0 or i >= len(self._views) or not self._views[i].sizes:
+            return
+        from PySide6.QtGui import QCursor
+        pos = QCursor.pos()
+        target = None
+        w = QApplication.widgetAt(pos)
+        while w is not None:
+            if isinstance(w, MainWindow):
+                target = w if w is not self else None
+                break
+            w = w.parentWidget()
+        if target is None and len(self._views) == 1:
+            return                       # כרטיסייה יחידה — היא כבר בחלון משלה
+        v = self._take_view(i)
+        if target is None:
+            target = MainWindow(self.pool, secondary=True)
+            target.resize(max(700, self.width() // 2), max(500, self.height()))
+            target.move(max(0, pos.x() - target.width() // 2), max(0, pos.y() - 20))
+            target.show()
+        target._put_view(v)
+        target.raise_()
+        target.activateWindow()
+        self._after_leave()
+
+    def _after_leave(self):
+        """חלון נוסף שהתרוקן נסגר מעצמו."""
+        if self.secondary and len(self._views) == 1 and not self._views[0].sizes:
+            QTimer.singleShot(0, self.close)
+
+    def move_to_window(self, i, target):
+        if target is self or i < 0 or i >= len(self._views):
+            return
+        v = self._take_view(i)
+        target._put_view(v)
+        target.raise_()
+        target.activateWindow()
+        self._after_leave()
+
+    def _tab_menu(self, pt):
+        i = self.tabbar.tabAt(pt)
+        if i < 0 or not self._views[i].sizes:
+            return
+        m = self._menu(self)
+        n_docs = sum(1 for x in self._views if x.sizes)
+        a = m.addAction("פתיחה בחלון נפרד")
+        a.setEnabled(len(self._views) > 1)
+        a.triggered.connect(lambda: self._detach_new(i))
+        others = [w for w in self._windows() if w is not self]
+        for w in others:
+            name = "החלון הראשי" if not w.secondary else os.path.basename(w.view.path or "") or "חלון אחר"
+            m.addAction("העברה אל: " + name).triggered.connect(lambda _=0, w=w: self.move_to_window(i, w))
+        m.addSeparator()
+        v = self._views[i]
+        if v is self.split_v:
+            m.addAction("סגירת התצוגה המפוצלת").triggered.connect(self._split_off)
+        else:
+            b = m.addAction("הצגה בצד השני (תצוגה מפוצלת)")
+            b.setEnabled(n_docs > 1)
+            b.triggered.connect(lambda: self._split_on(v))
+        m.addSeparator()
+        m.addAction("סגירת הכרטיסייה").triggered.connect(lambda: self.close_tab(i))
+        m.exec(self.tabbar.mapToGlobal(pt))
+
+    def _detach_new(self, i):
+        if len(self._views) < 2:
+            return
+        v = self._take_view(i)
+        w = MainWindow(self.pool, secondary=True)
+        w.resize(max(700, self.width() // 2), max(500, self.height()))
+        g = self.geometry()
+        w.move(g.x() + 60, g.y() + 60)
+        w.show()
+        w._put_view(v)
+        w.raise_()
+        w.activateWindow()
+
+    def toggle_split(self):
+        if self.split_v is not None:
+            self._split_off()
+            return
+        if not self._need_doc():
+            return
+        cand = [x for x in reversed(self._recent) if x is not self.view and x in self._views and x.sizes]
+        cand += [x for x in self._views if x is not self.view and x.sizes and x not in cand]
+        if not cand:
+            QMessageBox.information(self, APP_NAME, "לתצוגה מפוצלת צריך שני קבצים פתוחים.\n"
+                                                    "פותחים קובץ נוסף, והוא יוצג בצד השני.")
+            self.split_act.blockSignals(True)
+            self.split_act.setChecked(False)
+            self.split_act.blockSignals(False)
+            return
+        self._split_on(cand[0])
+
+    def _split_on(self, v):
+        """מציג את הכרטיסייה v בצד השני, ובצד הראשון נשארת כרטיסייה אחרת."""
+        if v not in self._views or not v.sizes:
+            return
+        if self.split_v is not None:
+            self._split_off()
+        if self.stack.currentWidget() is v:
+            # הקובץ הזה מוצג כרגע בצד הראשון — שם יוצג קובץ אחר
+            other = next((x for x in reversed(self._recent) if x is not v and x in self._views and x.sizes), None)
+            other = other or next((x for x in self._views if x is not v and x.sizes), None)
+            if other is None:
+                return
+            self.stack.setCurrentWidget(other)
+        self.stack.removeWidget(v)
+        self.pane2_lay.addWidget(v)
+        v.show()
+        self.split_v = v
+        self.pane2.show()
+        w = max(200, self.splitter.width() // 2)
+        self.splitter.setSizes([w, w])
+        self.split_act.blockSignals(True)
+        self.split_act.setChecked(True)
+        self.split_act.blockSignals(False)
+        main = self.stack.currentWidget()
+        self.tabbar.setCurrentIndex(self._views.index(main))
+        self._tab_switched(self._views.index(main))
+        for x in (main, v):
+            QTimer.singleShot(50, lambda x=x: (x.fit_width() if x.sizes else None, x._schedule(), x.viewport().update()))
+        self.statusBar().showMessage("תצוגה מפוצלת: קליק בצד מסוים הופך אותו לפעיל. "
+                                     "סגירה: תצוגה ← תצוגה מפוצלת", 8000)
+
+    def _split_off(self):
+        v = self.split_v
+        if v is None:
+            return
+        self.split_v = None
+        self.pane2_lay.removeWidget(v)
+        self.stack.addWidget(v)
+        self.pane2.hide()
+        if hasattr(self, "split_act"):
+            self.split_act.blockSignals(True)
+            self.split_act.setChecked(False)
+            self.split_act.blockSignals(False)
+        if v is self.view:
+            self.stack.setCurrentWidget(v)
+        self._mark_active()
+        for x in (self.stack.currentWidget(),):
+            if isinstance(x, PdfView):
+                QTimer.singleShot(50, lambda x=x: (x._schedule(), x.viewport().update()))
+
+    def _mark_active(self):
+        """בתצוגה מפוצלת: קו אדום עליון מסמן את הצד הפעיל."""
+        on = self.split_v is not None
+        for x in self._views:
+            act = on and x is self.view
+            x.setStyleSheet("PdfView { border-top: 3px solid %s; }" % ACCENT if act else
+                            ("PdfView { border-top: 3px solid transparent; }" if on else ""))
 
     def _find_tab(self, path):
         ap = os.path.normcase(os.path.abspath(path))
@@ -2452,6 +2742,8 @@ class MainWindow(QMainWindow):
         fm.addSeparator()
         self._act(fm, "מחיקת עמודים...", self.delete_pages_dialog,
                   "מחיקת העמוד הנוכחי או טווח עמודים. אפשר לבטל עד השמירה")
+        self._act(fm, "שמירת עמודים נבחרים כקובץ חדש...", self.extract_pages_dialog,
+                  "בוחרים עמודים (למשל 1, 2, 4-5) והם נשמרים כקובץ PDF חדש. הקובץ המקורי לא משתנה")
         tb.addWidget(self._menu_btn("קובץ", "פתיחה, שמירה ומחיקת עמודים", fm))
         self.print_btn = self._btn("הדפסה", "הדפסה בנייר — כל הקובץ, עמוד, מסך או חלון נבחר (Ctrl+P).\n"
                                             "בזמן בחירת חלון להדפסה הכפתור אדום; לחיצה נוספת או Esc מבטלים",
@@ -2668,6 +2960,12 @@ class MainWindow(QMainWindow):
         self.wheel_act.setToolTip("כשמסומן: הגלגלת מגדילה ומקטינה כמו באוטוקד, ו-Ctrl+גלגלת גולל")
         self.wheel_act.toggled.connect(self._wheel_mode)
         self._act(vm, "מסך מלא", self._toggle_full, shortcut="F11")
+        self.split_act = vm.addAction("תצוגה מפוצלת – שני קבצים זה לצד זה")
+        self.split_act.setCheckable(True)
+        self.split_act.setToolTip("שני קבצים פתוחים מוצגים זה לצד זה. אפשר גם לגרור כרטיסייה החוצה לחלון נפרד")
+        self.split_act.triggered.connect(lambda *_: self.toggle_split())
+        self._act(vm, "פתיחת הקובץ בחלון נפרד", lambda *_: self._detach_new(self._cur),
+                  "הקובץ הנוכחי עובר לחלון משלו (למסך שני). אפשר גם לגרור את הכרטיסייה החוצה")
         vm.addSeparator()
         self._act(vm, "הוראות הפעלה", self.show_help, shortcut="F1")
         gm = self._menu(self)
@@ -2881,6 +3179,11 @@ class MainWindow(QMainWindow):
     ADD_TOOLS = ("hole", "pen", "erase", "text", "trafo", "shape", "mark")
 
     def eventFilter(self, obj, ev):
+        # בתצוגה מפוצלת: קליק בצד אחד הופך אותו לפעיל, והסרגל פועל עליו
+        if ev.type() in (QEvent.MouseButtonPress, QEvent.FocusIn) and getattr(self, "split_v", None) is not None:
+            v = obj if isinstance(obj, PdfView) else obj.parent()
+            if isinstance(v, PdfView) and v in self._views and v is not self.view:
+                self.tabbar.setCurrentIndex(self._views.index(v))
         # כשכלי הוספה פעיל, לחיצה על "הוסף" מפסיקה אותו (במקום לפתוח שוב את התפריט)
         if ev.type() == QEvent.MouseButtonPress and (
                 (obj is getattr(self, "add_btn", None) and self.view.tool in self.ADD_TOOLS) or
@@ -3349,6 +3652,82 @@ class MainWindow(QMainWindow):
             out.append(run)
         return ", ".join(f"{r[0] + 1}" if len(r) == 1 else f"{r[0] + 1}–{r[-1] + 1}" for r in out)
 
+    def _parse_pages(self, txt, n):
+        """'1, 2, 4-5' → רשימת עמודים (1-based) בסדר שנכתב, בלי כפילויות. None ושגיאה מוצגת אם לא תקין."""
+        out = []
+        try:
+            for part in txt.replace(" ", "").replace("–", "-").replace("،", ",").split(","):
+                if not part:
+                    continue
+                if "-" in part:
+                    a, b = part.split("-", 1)
+                    a, b = int(a), int(b)
+                    rng = range(a, b + 1) if a <= b else range(a, b - 1, -1)
+                else:
+                    rng = [int(part)]
+                for q in rng:
+                    if q not in out:
+                        out.append(q)
+        except ValueError:
+            QMessageBox.warning(self, APP_NAME, "לא הבנתי את מספרי העמודים. כותבים למשל: 1, 2, 4-5")
+            return None
+        bad = [q for q in out if q < 1 or q > n]
+        if bad:
+            QMessageBox.warning(self, APP_NAME, f"אין עמוד {bad[0]} בקובץ (יש {n} עמודים).")
+            return None
+        return out or None
+
+    def extract_pages_dialog(self):
+        """שמירת עמודים נבחרים כקובץ חדש (עם הסימונים שעל העמודים). הקובץ הפתוח לא משתנה."""
+        v = self.view
+        if not self._need_doc():
+            return
+        if v.editor:
+            v.finish_text_edit()
+        n = len(v.sizes)
+        cur = max(0, v._cur_page) + 1
+        txt, ok = QInputDialog.getText(self, "שמירת עמודים נבחרים כקובץ חדש",
+                                       f"אילו עמודים לשמור בקובץ החדש? (מתוך {n})\n"
+                                       "לדוגמה: 1, 2, 4-5   (הסדר בקובץ החדש לפי הסדר שנכתב)",
+                                       QLineEdit.Normal, str(cur))
+        if not ok or not txt.strip():
+            return
+        pages = self._parse_pages(txt, n)
+        if not pages:
+            return
+        base, _ = os.path.splitext(v.path)
+        label = txt.strip().replace(" ", "").replace(",", ", ")
+        sugg = f"{base} - עמודים {label}.pdf"
+        target, _ = QFileDialog.getSaveFileName(self, "שמירת עמודים נבחרים כקובץ חדש", sugg, "קובצי PDF (*.pdf)")
+        if not target:
+            return
+        if not target.lower().endswith(".pdf"):
+            target += ".pdf"
+        if os.path.abspath(target).lower() == os.path.abspath(v.path).lower():
+            QMessageBox.warning(self, APP_NAME, "בוחרים שם אחר — הקובץ המקורי לא נדרס.")
+            return
+        k = self._find_tab(target)
+        if k >= 0:
+            QMessageBox.warning(self, APP_NAME, "קובץ בשם הזה פתוח כרגע בכרטיסייה אחרת. בוחרים שם אחר או סוגרים אותו.")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            doc2 = pymupdf.open(v.src)
+            if doc2.needs_pass:
+                doc2.authenticate(v.pw or "")
+            scales = {i: v.scale_of(i) for i, items in v.items.items() if items}
+            marks_store.save(doc2, v.items, scales)
+            doc2.select([q - 1 for q in pages])
+            doc2.save(target, garbage=3, deflate=True)
+            doc2.close()
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, APP_NAME, f"השמירה נכשלה:\n{e}")
+            return
+        QApplication.restoreOverrideCursor()
+        self.open_path(target)
+        self.statusBar().showMessage(f"נשמר קובץ חדש עם {len(pages)} עמודים: {os.path.basename(target)}", 9000)
+
     def delete_pages_dialog(self):
         v = self.view
         if not self._need_doc():
@@ -3514,7 +3893,14 @@ class MainWindow(QMainWindow):
                 if not self._confirm_discard():
                     ev.ignore()
                     return
-        self.settings.setValue("geometry", self.saveGeometry())
+        if self.secondary:
+            for v in self._views:
+                try:
+                    v.analyzer.shutdown()
+                except Exception:
+                    pass
+        else:
+            self.settings.setValue("geometry", self.saveGeometry())
         super().closeEvent(ev)
 
 
@@ -3642,9 +4028,10 @@ def main():
         except Exception:
             pass
     pool.shutdown()
-    for v in win._views:
-        try:
-            v.analyzer.shutdown()
-        except Exception:
-            pass
+    for w in [win] + [x for x in QApplication.topLevelWidgets() if isinstance(x, MainWindow) and x is not win]:
+        for v in w._views:
+            try:
+                v.analyzer.shutdown()
+            except Exception:
+                pass
     return rc
