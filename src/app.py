@@ -3800,15 +3800,85 @@ class MainWindow(QMainWindow):
     def _print_overlay(self, painter, pno):
         self.view.paint_overlay(painter, pno, cosmetic=False)
 
+    _converted = {}                     # תמונה → ה-PDF שנוצר ממנה (בהפעלה הזאת)
+    IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp", ".jfif")
+
+    def _image_to_pdf(self, img):
+        """תמונה → קובץ PDF ליד התמונה (אותו שם, סיומת pdf; אם קיים — עם מספר). מחזיר את הנתיב או None.
+        תמונה עם רזולוציה אמיתית (סריקה) נשמרת בגודל האמיתי; צילום — מותאם לדף A4 לפי הכיוון."""
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            src = pymupdf.open(img)
+            pdfb = src.convert_to_pdf()
+            src.close()
+            conv = pymupdf.open("pdf", pdfb)
+            out = pymupdf.open()
+            for i in range(conv.page_count):
+                r = conv[i].rect
+                try:
+                    pix = pymupdf.Pixmap(img) if conv.page_count == 1 else None
+                    dpi = min(pix.xres, pix.yres) if pix else 0
+                except Exception:
+                    dpi = 0
+                if dpi >= 100 and pix:
+                    w, h = pix.width * 72.0 / pix.xres, pix.height * 72.0 / pix.yres
+                else:
+                    a4w, a4h = 595.0, 842.0
+                    w, h = (a4h, a4w) if r.width > r.height else (a4w, a4h)
+                pg = out.new_page(width=w, height=h)
+                pg.show_pdf_page(pg.rect, conv, i)
+            conv.close()
+            stem, _ = os.path.splitext(img)
+            target = None
+            for cand in [os.path.dirname(img), os.path.join(os.path.expanduser("~"), "Documents")]:
+                base = stem if cand == os.path.dirname(img) else os.path.join(cand, os.path.basename(stem))
+                for k in range(1, 50):
+                    t = base + ("" if k == 1 else f" ({k})") + ".pdf"
+                    if os.path.exists(t) or self._find_tab(t) >= 0:
+                        continue
+                    try:
+                        out.save(t, garbage=3, deflate=True)
+                        target = t
+                    except Exception:
+                        pass
+                    break
+                if target:
+                    break
+            out.close()
+            return target
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, APP_NAME, f"לא ניתן להמיר את התמונה ל-PDF:\n{img}\n\n{e}")
+            return None
+        finally:
+            if QApplication.overrideCursor():
+                QApplication.restoreOverrideCursor()
+
     def open_dialog(self):
         d = self.settings.value("last_dir", "")
-        path, _ = QFileDialog.getOpenFileName(self, "פתיחת קובץ PDF", d, "קובצי PDF (*.pdf);;כל הקבצים (*.*)")
+        path, _ = QFileDialog.getOpenFileName(self, "פתיחת קובץ PDF או תמונה", d,
+                                              "PDF ותמונות (*.pdf *.png *.jpg *.jpeg *.jfif *.bmp *.gif *.tif *.tiff *.webp);;"
+                                              "קובצי PDF (*.pdf);;תמונות (*.png *.jpg *.jpeg *.jfif *.bmp *.gif *.tif *.tiff *.webp);;"
+                                              "כל הקבצים (*.*)")
         if path:
             self.open_path(path)
 
     def open_path(self, path, ask=True):
         """ask=True: פתיחה רגילה — קובץ שכבר פתוח מוצג בכרטיסייה שלו, וקובץ חדש נפתח בכרטיסייה חדשה.
-        ask=False: טעינה מחדש של הקובץ בכרטיסייה הנוכחית (אחרי שמירה)."""
+        ask=False: טעינה מחדש של הקובץ בכרטיסייה הנוכחית (אחרי שמירה).
+        תמונה: מומרת אוטומטית לקובץ PDF ליד התמונה, והוא נפתח לצפייה ועריכה."""
+        if ask and path.lower().endswith(self.IMG_EXT):
+            img = os.path.abspath(path)
+            conv = MainWindow._converted.get(img)
+            if conv and self._find_tab(conv) >= 0:      # התמונה כבר הומרה ופתוחה — עוברים אליה
+                path = conv
+            else:
+                path = self._image_to_pdf(img)
+                if not path:
+                    return
+                MainWindow._converted[img] = path
+            QTimer.singleShot(300, lambda n=os.path.basename(path): self.statusBar().showMessage(
+                "התמונה הומרה ל-PDF ונשמרה ליד התמונה: " + n, 9000))
         if ask:
             k = self._find_tab(path)
             if k >= 0:
@@ -3882,7 +3952,7 @@ class MainWindow(QMainWindow):
     def dropEvent(self, ev):
         for u in ev.mimeData().urls():
             p = u.toLocalFile()
-            if p and p.lower().endswith(".pdf"):
+            if p and p.lower().endswith((".pdf",) + self.IMG_EXT):
                 self.open_path(p)
 
     def closeEvent(self, ev):
