@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QAbstractScrollArea, Q
                                QStackedWidget,
                                QToolBar, QToolButton, QLabel, QLineEdit, QComboBox,
                                QFileDialog, QMessageBox, QInputDialog, QWidget,
-                               QSizePolicy, QDialog, QMenu, QProgressDialog)
+                               QSizePolicy, QDialog, QMenu, QProgressDialog, QPushButton)
 
 from render_worker import worker_main
 from version import VERSION, BUILD_DATE, LOGO_B64
@@ -253,6 +253,7 @@ class PdfView(QAbstractScrollArea):
     tool_changed = Signal(str)
     changed = Signal()
     status = Signal(str)
+    stamp_pending_changed = Signal()   # חותמת "לכל העמודים" מחכה שיקבעו את גודלה בעמוד הראשון
     scale_changed = Signal(float)
 
     def __init__(self, pool):
@@ -321,6 +322,7 @@ class PdfView(QAbstractScrollArea):
         self.analyze_timer.timeout.connect(self._request_analysis)
         self.shape_start = None
         self.stamp_job = None
+        self.stamp_pending = None    # (עמוד, חותמת) — החותמת הראשונה של "כל העמודים", לפני השכפול
         self.erase_rect = None       # (עמוד, מלבן) של מחיקת אזור שעוד לא אושרה
         self._seg_cache = {}         # עמוד -> קטעי קווים לחיפוש "פריט בודד" (נבנה רק בשימוש)
         self._ink_cache = {}         # (מסמך, עמוד) -> מפת דיו למציאת מקום פנוי לחותמת
@@ -1631,8 +1633,51 @@ class PdfView(QAbstractScrollArea):
         self._stamp_clean = clean
         return abs(cx - cx0) > 0.5 or abs(cy - cy0) > 0.5
 
-    def stamp_all_pages(self, i0, it0):
-        """מוסיף את החותמת לשאר העמודים, במקום פנוי מטקסט קרוב למיקום שנבחר בעמוד הראשון."""
+    def pending_stamp(self):
+        """החותמת שמחכה לשכפול, אם היא עדיין קיימת בעמוד (אולי נמחקה או בוטלה)."""
+        if not self.stamp_pending:
+            return None
+        i, it = self.stamp_pending
+        if any(o is it for o in self.items.get(i, ())):
+            return self.stamp_pending
+        self.stamp_pending = None
+        self.stamp_pending_changed.emit()
+        return None
+
+    def cancel_pending_stamp(self):
+        if self.stamp_pending:
+            self.stamp_pending = None
+            self.stamp_pending_changed.emit()
+            self.status.emit("השכפול בוטל — החותמת נשארה רק בעמוד הזה")
+
+    def ask_duplicate_stamp(self):
+        p = self.pending_stamp()
+        if not p:
+            return
+        i, it = p
+        n = len(self.sizes)
+        r = QMessageBox.question(self, APP_NAME,
+                                 f"לשכפל את החותמת בגודל הזה לכל {n} העמודים?\n\n"
+                                 "בכל עמוד היא תונח באותו גודל, קרוב לאותו מקום, במקום שלא מסתיר טקסט או שרטוט.",
+                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if r == QMessageBox.Yes:
+            self.duplicate_pending_stamp()
+        else:
+            self.status.emit("אפשר להמשיך לכוונן. כשמוכנים — \"שכפול לכל העמודים\" בשורה התחתונה")
+
+    def duplicate_pending_stamp(self):
+        p = self.pending_stamp()
+        if not p:
+            return
+        i, it = p
+        self.stamp_pending = None
+        self.stamp_pending_changed.emit()
+        self._push_undo()
+        self.stamp_all_pages(i, it, keep_size=True)
+
+    def stamp_all_pages(self, i0, it0, keep_size=False):
+        """מוסיף את החותמת לשאר העמודים, במקום פנוי מטקסט קרוב למיקום שנבחר בעמוד הראשון.
+        keep_size: באותו גודל שנקבע בעמוד הראשון (אחרת — גודל אוטומטי לפי הכתב בכל עמוד)."""
         n = len(self.sizes)
         W0, H0 = self.sizes[i0]
         r = EXTRA["stamp"]["bbox"](it0)
@@ -1656,7 +1701,7 @@ class PdfView(QAbstractScrollArea):
                 W, H = self.sizes[j]
                 it = dict(it0)
                 it["c"] = (fx * W, fy * H)
-                if self._stamp_fit(j, it, autosize=True):
+                if self._stamp_fit(j, it, autosize=not keep_size):
                     moved += 1
                 if not self._stamp_clean:
                     crowded.append(j)
@@ -1673,7 +1718,8 @@ class PdfView(QAbstractScrollArea):
         if crowded:
             pg = ", ".join(str(j + 1) for j in crowded[:12]) + ("..." if len(crowded) > 12 else "")
             extra += f". בעמודים {pg} אין מקום פנוי לגמרי — הונחה במקום שמסתיר הכי פחות, כדאי לבדוק"
-        self.status.emit(f"החותמת נוספה ל-{done + 1} עמודים{extra}. ביטול פעולה מסיר את כולן")
+        self.status.emit(f"החותמת נוספה ל-{done + 1} עמודים" + (" באותו גודל" if keep_size else "") +
+                         f"{extra}. ביטול פעולה מסיר את השכפול")
 
     def has_items(self):
         return any(self.items.values())
@@ -1819,8 +1865,13 @@ class PdfView(QAbstractScrollArea):
             self.set_tool("pan")
             self.selected = (i, len(self.items[i]) - 1)
             self.viewport().update()
-            if job == "all":
-                QTimer.singleShot(0, lambda: self.stamp_all_pages(i, it))
+            if job == "all" and len(self.sizes) > 1:
+                # קודם קובעים גודל ומיקום בעמוד הזה; השכפול לכל העמודים — רק אחרי אישור
+                self.stamp_pending = (i, it)
+                self.stamp_pending_changed.emit()
+                self.status.emit("קבעו את הגודל (גוררים פינה) והמיקום של החותמת בעמוד הזה. "
+                                 "אחרי שינוי הגודל תופיע שאלה אם לשכפל לכל העמודים — "
+                                 "או לוחצים \"שכפול לכל העמודים\" בשורה התחתונה")
             else:
                 self.status.emit(("" if self._stamp_clean else "אין בעמוד מקום פנוי לגמרי — החותמת הונחה במקום שמסתיר הכי פחות. ") +
                                  ("החותמת הוזזה למקום שלא מסתיר טקסט או שרטוט. " if shifted and self._stamp_clean else "") +
@@ -2063,6 +2114,12 @@ class PdfView(QAbstractScrollArea):
             self._stroke = None
             self.dirty = True
             self.changed.emit()
+        if self._resize and self.stamp_pending:
+            ri, ridx = self._resize[0], self._resize[1]
+            p = self.pending_stamp()
+            if p and ri == p[0] and ridx < len(self.items.get(ri, [])) and self.items[ri][ridx] is p[1] \
+                    and abs(self._resize[3].get("w", 0) - p[1].get("w", 0)) > 0.01:
+                QTimer.singleShot(0, self.ask_duplicate_stamp)
         self._erasing = False
         self._move = None
         self._resize = None
@@ -2261,7 +2318,33 @@ class MainWindow(QMainWindow):
         return self.view.tray
 
     SIGS = ("page_changed", "zoom_changed", "tool_changed", "changed", "status", "region_selected",
-            "select_cancelled", "scale_changed")
+            "select_cancelled", "scale_changed", "stamp_pending_changed")
+
+    def _stamp_bar(self):
+        """שני כפתורים בשורה התחתונה כשחותמת "לכל העמודים" מחכה לשכפול (נבנים בפעם הראשונה בלבד)."""
+        if getattr(self, "_sbar", None) is None:
+            w = QWidget()
+            lay = QHBoxLayout(w)
+            lay.setContentsMargins(0, 0, 6, 0)
+            lay.setSpacing(6)
+            b1 = QPushButton("שכפול לכל העמודים")
+            b1.setStyleSheet(f"QPushButton {{ background: {ACCENT}; color: white; border: none; border-radius: 4px; "
+                             "padding: 3px 12px; font-weight: 600; }")
+            b1.setToolTip("החותמת תונח בכל העמודים באותו גודל שקבעתם בעמוד הזה")
+            b1.clicked.connect(lambda: self.view.duplicate_pending_stamp())
+            b2 = QPushButton("רק בעמוד הזה")
+            b2.setToolTip("לא לשכפל — החותמת נשארת רק בעמוד הזה")
+            b2.clicked.connect(lambda: self.view.cancel_pending_stamp())
+            lay.addWidget(b1)
+            lay.addWidget(b2)
+            self.statusBar().addPermanentWidget(w)
+            self._sbar = w
+        return self._sbar
+
+    def _sync_stamp_bar(self, *_):
+        on = bool(self.view.stamp_pending)
+        if on or getattr(self, "_sbar", None) is not None:
+            self._stamp_bar().setVisible(on)
 
     def _wire(self, v):
         """מחבר כרטיסייה לחלון הזה (גם כרטיסייה שהגיעה מחלון אחר)."""
@@ -2273,6 +2356,7 @@ class MainWindow(QMainWindow):
         v.tool_changed.connect(cur(self._on_tool))
         v.changed.connect(lambda *a, v=v: self._view_changed(v))
         v.status.connect(cur(lambda m: self.statusBar().showMessage(m, 6000)))
+        v.stamp_pending_changed.connect(cur(self._sync_stamp_bar))
         v.region_selected.connect(cur(self._region))
         v.select_cancelled.connect(cur(lambda: self.statusBar().clearMessage()))
         v.scale_changed.connect(cur(self._show_scale))
@@ -2344,6 +2428,7 @@ class MainWindow(QMainWindow):
             if x not in self._recent and x is not self.split_v and x is not self.stack.currentWidget():
                 x.drop_tiles()
         self._mark_active()
+        self._sync_stamp_bar()
         self._sync_current()
         v.setFocus()
         v._schedule()
