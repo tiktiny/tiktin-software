@@ -3418,10 +3418,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, f"ההעתקה נכשלה:\n{e}")
             return
         QApplication.restoreOverrideCursor()
-        QApplication.clipboard().setImage(c["img"])
+        from cliptray import image_mime
+        QApplication.clipboard().setMimeData(image_mime(c["img"]))
         self.tray.add(c)
-        self.statusBar().showMessage("✓ הקטע נקלט והועתק באיכות מלאה — אפשר להדביק (Ctrl+V). "
-                                     "במגש בפינה: לחיצה מעתיקה שוב, גרירה מוציאה כקובץ PDF", 9000)
+        self.statusBar().showMessage("✓ הקטע הועתק כתמונה — מדביקים (Ctrl+V) בגוף המייל, בוורד או בוואטסאפ. "
+                                     "כקובץ PDF: גוררים את הקטע מהמגש בפינה, או לחצן ימני עליו ← העתקה כקובץ PDF", 12000)
 
     def _make_clip(self, i, clip):
         """קטע מהשרטוט: PDF וקטורי (כולל הסימונים) + תמונה ברזולוציה גבוהה להדבקה."""
@@ -3437,14 +3438,16 @@ class MainWindow(QMainWindow):
         out = pymupdf.open()
         pg = out.new_page(width=clip.width, height=clip.height)
         pg.show_pdf_page(pg.rect, one, 0, clip=clip)
-        d = os.path.join(tempfile.gettempdir(), "TiktinPDF-clips")
+        # כל קטע בתיקייה משלו, כדי שלקובץ יהיה שם נקי (זה השם שהנמען רואה)
+        d = os.path.join(tempfile.gettempdir(), "TiktinPDF-clips", uuid.uuid4().hex[:8])
         os.makedirs(d, exist_ok=True)
         base = os.path.splitext(os.path.basename(v.path or "קטע"))[0]
         name = f"{base} - עמוד {i + 1} - קטע.pdf"
-        path = os.path.join(d, uuid.uuid4().hex[:8] + " " + name)
+        path = os.path.join(d, name)
         out.save(path, garbage=1, deflate=True)
-        # תמונה: 400 DPI, עד 6000 פיקסלים בצד הארוך
-        s = min(400 / 72.0, 6000.0 / max(clip.width, clip.height))
+        # תמונה להדבקה: חדה (עד 300 DPI) אבל לא ענקית — עד 2400 פיקסלים בצד הארוך.
+        # תמונה גדולה מזה לא מוצגת בהדבקה במייל ונתקעת בוואטסאפ.
+        s = min(300 / 72.0, 2400.0 / max(clip.width, clip.height))
         pix = one[0].get_pixmap(matrix=pymupdf.Matrix(s, s), clip=clip, alpha=False)
         img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
         one.close()
@@ -4046,7 +4049,11 @@ def _clean_temp():
             for f in os.listdir(d):
                 fp = os.path.join(d, f)
                 if time.time() - os.path.getmtime(fp) > 2 * 86400:
-                    os.remove(fp)
+                    if os.path.isdir(fp):
+                        import shutil
+                        shutil.rmtree(fp, ignore_errors=True)
+                    else:
+                        os.remove(fp)
         except OSError:
             pass
 

@@ -10,6 +10,30 @@ MAX_CLIPS = 2
 THUMB_W, THUMB_H = 150, 104
 
 
+def image_mime(img):
+    """הקטע כתמונה בלבד — בפורמטים שמייל (אאוטלוק, ג'ימייל בדפדפן), וורד ווואטסאפ מקבלים.
+    בלי קובץ ובלי HTML לצידה, כדי שהתוכנה שמדביקים בה לא תבחר בהם במקום בתמונה."""
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+    md = QMimeData()
+    md.setImageData(img)                       # ‏DIB — אאוטלוק, וורד, פיינט
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QIODevice.WriteOnly)
+    img.save(buf, "PNG")
+    buf.close()
+    md.setData("image/png", ba)                # ‏PNG — דפדפנים (ג'ימייל), וואטסאפ
+    md.setData('application/x-qt-windows-mime;value="PNG"', ba)   # אותו PNG בשם שחלונות מכיר
+    return md
+
+
+def file_mime(path):
+    """הקטע כקובץ PDF בלבד (בלי תמונה לצידו), כך שבהדבקה או בגרירה עובר בדיוק הקובץ הזה."""
+    md = QMimeData()
+    md.setUrls([QUrl.fromLocalFile(path)])
+    md.setData('application/x-qt-windows-mime;value="Preferred DropEffect"', b"\x01\x00\x00\x00")   # העתקה, לא העברה
+    return md
+
+
 class ClipItem(QFrame):
     removed = Signal(object)
     copied = Signal(str)
@@ -20,9 +44,9 @@ class ClipItem(QFrame):
         self.setObjectName("clip")
         self.setFixedSize(THUMB_W + 12, THUMB_H + 34)
         self.setCursor(Qt.OpenHandCursor)
-        self.setToolTip("לחיצה: העתקה שוב כתמונה להדבקה.\n"
-                        "גרירה: הוצאת הקטע כקובץ PDF לתיקייה, למייל או לוואטסאפ.\n"
-                        "לחצן ימני: עוד אפשרויות")
+        self.setToolTip("לחיצה: העתקה כתמונה — מדביקים (Ctrl+V) בגוף המייל, בוורד או בוואטסאפ.\n"
+                        "גרירה: הקטע עובר כקובץ PDF — לתיקייה או כקובץ מצורף למייל.\n"
+                        "לחצן ימני: העתקה כקובץ PDF, שמירה ועוד")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(5, 4, 5, 4)
         lay.setSpacing(2)
@@ -65,14 +89,16 @@ class ClipItem(QFrame):
 
     # ----- copy / drag
     def copy_image(self):
-        QApplication.clipboard().setImage(self.clip["img"])
-        self.copied.emit("הקטע הועתק כתמונה ברזולוציה גבוהה — אפשר להדביק (Ctrl+V)")
+        QApplication.clipboard().setMimeData(image_mime(self.clip["img"]))
+        self.copied.emit("הקטע הועתק כתמונה — מדביקים (Ctrl+V) בגוף המייל, בוורד או בוואטסאפ")
 
     def copy_pdf(self):
-        md = QMimeData()
-        md.setUrls([QUrl.fromLocalFile(self.clip["pdf"])])
-        QApplication.clipboard().setMimeData(md)
-        self.copied.emit("הקטע הועתק כקובץ PDF — אפשר להדביק בתיקייה, במייל או בוואטסאפ")
+        if not os.path.exists(self.clip["pdf"]):
+            self.copied.emit("קובץ הקטע כבר לא קיים — קולטים את האזור מחדש")
+            return
+        QApplication.clipboard().setMimeData(file_mime(self.clip["pdf"]))
+        self.copied.emit("הקטע הועתק כקובץ PDF (" + os.path.basename(self.clip["pdf"]) +
+                         ") — מדביקים (Ctrl+V) בתיקייה או כקובץ מצורף במייל")
 
     def save_pdf(self):
         path, _ = QFileDialog.getSaveFileName(self, "שמירת הקטע כ-PDF", self.clip["name"], "קובצי PDF (*.pdf)")
@@ -91,11 +117,8 @@ class ClipItem(QFrame):
         if (ev.position().toPoint() - self._press).manhattanLength() < 8:
             return
         self._press = None
-        md = QMimeData()
-        md.setUrls([QUrl.fromLocalFile(self.clip["pdf"])])
-        md.setImageData(self.clip["img"])
         drag = QDrag(self)
-        drag.setMimeData(md)
+        drag.setMimeData(file_mime(self.clip["pdf"]))
         drag.setPixmap(self.pic.pixmap())
         drag.setHotSpot(QPoint(20, 20))
         drag.exec(Qt.CopyAction)
@@ -108,8 +131,8 @@ class ClipItem(QFrame):
     def contextMenuEvent(self, ev):
         m = QMenu(self)
         m.setLayoutDirection(Qt.RightToLeft)
-        m.addAction("העתקה כתמונה (להדבקה בוורד, במייל ובוואטסאפ)").triggered.connect(self.copy_image)
-        m.addAction("העתקה כקובץ PDF").triggered.connect(self.copy_pdf)
+        m.addAction("העתקה כתמונה (להדבקה בגוף המייל, בוורד ובוואטסאפ)").triggered.connect(self.copy_image)
+        m.addAction("העתקה כקובץ PDF (לצירוף למייל או לתיקייה)").triggered.connect(self.copy_pdf)
         m.addAction("שמירה כ-PDF...").triggered.connect(self.save_pdf)
         m.addSeparator()
         m.addAction("הסרה מהמגש").triggered.connect(lambda: self.removed.emit(self))
@@ -148,10 +171,7 @@ class ClipTray(QWidget):
             self.items.remove(it)
             it.hide()
             it.deleteLater()
-            try:
-                os.remove(it.clip["pdf"])
-            except OSError:
-                pass
+            # הקובץ לא נמחק כאן — אולי הוא עדיין בלוח ההעתקה; קבצים ישנים נמחקים בהפעלה הבאה
         if not self.items:
             self.hide()
         else:
