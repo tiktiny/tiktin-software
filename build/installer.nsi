@@ -1,7 +1,7 @@
 Unicode true
 !include "MUI2.nsh"
-Name "טיקטין PDF A"
-OutFile "${ROOT}/out/TiktinPDF-Setup-A.exe"
+Name "TIKTINPDF – גרסה משרדית"
+OutFile "${ROOT}/out/TiktinPDF-Setup.exe"
 InstallDir "$LOCALAPPDATA\Programs\TiktinPDF-A"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
@@ -10,7 +10,7 @@ Icon "${ROOT}/out/tiktin_pdf.ico"
 !define MUI_ICON "${ROOT}/out/tiktin_pdf.ico"
 !define MUI_UNICON "${ROOT}/out/tiktin_pdf.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\TiktinPDF-A.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "הפעלת טיקטין PDF A"
+!define MUI_FINISHPAGE_RUN_TEXT "הפעלת TIKTINPDF גרסה משרדית"
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -32,8 +32,11 @@ Section "install"
   SetOutPath "$INSTDIR\runtime"
   File /r "${ROOT}/winpy/*.*"
   WriteUninstaller "$INSTDIR\uninstall.exe"
-  CreateShortcut "$SMPROGRAMS\טיקטין PDF A.lnk" "$INSTDIR\TiktinPDF-A.exe" "" "$INSTDIR\tiktin_pdf.ico"
-  CreateShortcut "$DESKTOP\טיקטין PDF A.lnk" "$INSTDIR\TiktinPDF-A.exe" "" "$INSTDIR\tiktin_pdf.ico"
+  ; השם החדש בלי A — מסירים את הקיצורים הישנים
+  Delete "$SMPROGRAMS\טיקטין PDF A.lnk"
+  Delete "$DESKTOP\טיקטין PDF A.lnk"
+  CreateShortcut "$SMPROGRAMS\TIKTINPDF גרסה משרדית.lnk" "$INSTDIR\TiktinPDF-A.exe" "" "$INSTDIR\tiktin_pdf.ico"
+  CreateShortcut "$DESKTOP\TIKTINPDF גרסה משרדית.lnk" "$INSTDIR\TiktinPDF-A.exe" "" "$INSTDIR\tiktin_pdf.ico"
   ; "חותמת אוטומטית" היא עכשיו תוכנה נפרדת עם התקנה משלה — מסירים את מה שגרסה A1.11.0 התקינה כאן
   Delete "$INSTDIR\TiktinBoardStamp.exe"
   Delete "$INSTDIR\tiktin_stamp.ico"
@@ -41,11 +44,11 @@ Section "install"
   Delete "$DESKTOP\חותמת לוחות אוטומטית – טיקטין.lnk"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.pdf\shell\TiktinBoardStamp"
   ; שיוך לקובצי PDF (פתיחה באמצעות)
-  WriteRegStr HKCU "Software\Classes\TiktinPDF-A.Document" "" "מסמך PDF (טיקטין A)"
+  WriteRegStr HKCU "Software\Classes\TiktinPDF-A.Document" "" "מסמך PDF (TIKTINPDF)"
   WriteRegStr HKCU "Software\Classes\TiktinPDF-A.Document\DefaultIcon" "" "$INSTDIR\tiktin_pdf.ico"
   WriteRegStr HKCU "Software\Classes\TiktinPDF-A.Document\shell\open\command" "" '"$INSTDIR\TiktinPDF-A.exe" "%1"'
   WriteRegStr HKCU "Software\Classes\.pdf\OpenWithProgids" "TiktinPDF-A.Document" ""
-  WriteRegStr HKCU "Software\Classes\Applications\TiktinPDF-A.exe" "FriendlyAppName" "טיקטין PDF A"
+  WriteRegStr HKCU "Software\Classes\Applications\TiktinPDF-A.exe" "FriendlyAppName" "TIKTINPDF גרסה משרדית"
   WriteRegStr HKCU "Software\Classes\Applications\TiktinPDF-A.exe\SupportedTypes" ".pdf" ""
   ; תמונות: "פתיחה באמצעות" טיקטין PDF — התמונה מומרת ל-PDF
   WriteRegStr HKCU "Software\Classes\.png\OpenWithProgids" "TiktinPDF-A.Document" ""
@@ -67,7 +70,7 @@ Section "install"
   WriteRegStr HKCU "Software\Classes\.webp\OpenWithProgids" "TiktinPDF-A.Document" ""
   WriteRegStr HKCU "Software\Classes\Applications\TiktinPDF-A.exe\SupportedTypes" ".webp" ""
   WriteRegStr HKCU "Software\Classes\Applications\TiktinPDF-A.exe\shell\open\command" "" '"$INSTDIR\TiktinPDF-A.exe" "%1"'
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\TiktinPDF-A" "DisplayName" "טיקטין PDF A"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\TiktinPDF-A" "DisplayName" "TIKTINPDF – גרסה משרדית"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\TiktinPDF-A" "DisplayVersion" "${VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\TiktinPDF-A" "Publisher" "Tiktin"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\TiktinPDF-A" "DisplayIcon" "$INSTDIR\tiktin_pdf.ico"
@@ -79,6 +82,8 @@ SectionEnd
 Section "Uninstall"
   Delete "$SMPROGRAMS\טיקטין PDF A.lnk"
   Delete "$DESKTOP\טיקטין PDF A.lnk"
+  Delete "$SMPROGRAMS\TIKTINPDF גרסה משרדית.lnk"
+  Delete "$DESKTOP\TIKTINPDF גרסה משרדית.lnk"
   Delete "$SMPROGRAMS\חותמת לוחות אוטומטית – טיקטין.lnk"
   Delete "$DESKTOP\חותמת לוחות אוטומטית – טיקטין.lnk"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.pdf\shell\TiktinBoardStamp"
