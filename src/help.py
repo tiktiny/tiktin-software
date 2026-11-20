@@ -1,4 +1,7 @@
 # חלון הוראות ההפעלה (F1)
+import re
+
+import brand
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextBrowser, QPushButton, QLabel
 
@@ -155,10 +158,25 @@ a { color: #0057b8; text-decoration: none; }
 """
 
 
+def help_html():
+    """בגרסה המסחרית: בלי שם טיקטין, בלי תקן ירוק ובלי החותמות של המשרד."""
+    if not brand.COMMERCIAL:
+        return HELP_HTML.replace("טיקטין PDF", brand.APP_NAME)
+    h = re.sub(r"<h2>תקן ירוק</h2>.*?</ul>", "", HELP_HTML, flags=re.S)
+    h = re.sub(r"<li>שתי חותמות מובנות.*?</li>",
+               "<li>מוסיפים חותמות משלכם מקובץ תמונה או PDF (עד 3 חותמות, נשמרות במחשב הזה).</li>", h, flags=re.S)
+    h = re.sub(r"<li><b>חותמת אוטומטית – טיקטין</b>.*?</li>", "", h, flags=re.S)
+    h = re.sub(r'(<h2><a name="erase"></a>.*?</h2>\s*<ul>)',
+               r"\1<li><b>בגרסה הזו המחיקה מכסה בלבן:</b> במסך ובהדפסה האזור נמחק, אבל טקסט שהיה מתחתיו "
+               r"עדיין קיים בקובץ (יימצא בחיפוש ובהעתקה).</li>", h, count=1, flags=re.S)
+    h = h.replace("בטיקטין PDF", "בתוכנה הזו").replace("טיקטין PDF", brand.APP_NAME)
+    return h
+
+
 class HelpDialog(QDialog):
     def __init__(self, parent, version=""):
         super().__init__(parent)
-        self.setWindowTitle("טיקטין PDF A — הוראות הפעלה")
+        self.setWindowTitle(f"{brand.APP_NAME} {brand.EDITION} — הוראות הפעלה")
         self.setLayoutDirection(Qt.RightToLeft)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         lay = QVBoxLayout(self)
@@ -167,7 +185,7 @@ class HelpDialog(QDialog):
         tb.setOpenLinks(False)
         tb.setStyleSheet("QTextBrowser{background:#ffffff;border:1px solid #cfd4db;}")
         tb.document().setDefaultStyleSheet("")
-        tb.setHtml(f'<div dir="rtl">{HELP_HTML}</div>')
+        tb.setHtml(f'<div dir="rtl">{help_html()}</div>')
         tb.anchorClicked.connect(lambda url: tb.scrollToAnchor(url.fragment()))
         lay.addWidget(tb, 1)
         row = QHBoxLayout()

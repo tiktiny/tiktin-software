@@ -1,5 +1,6 @@
 # הדפסה עם תצוגה מקדימה: כל הקובץ / עמוד נוכחי / מסך נוכחי / בחירת חלון,
 # A4 או A3, צבע או שחור-לבן. בשולי כל גיליון: שם הקובץ, תאריך ההדפסה וקנ"מ ההדפסה.
+import brand
 import os
 import datetime
 import pymupdf
@@ -94,7 +95,7 @@ class PrintDialog(QDialog):
         self.window_job = None
         self._cache = {}
         self.sheet = 0
-        st = QSettings("Tiktin", "TiktinPDF")
+        st = QSettings(*brand.ORG)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(10)
@@ -333,7 +334,7 @@ class PrintDialog(QDialog):
     # ----- print
     def save(self):
         o = self.opts()
-        st = QSettings("Tiktin", "TiktinPDF")
+        st = QSettings(*brand.ORG)
         for k in ("range", "paper", "color", "printer"):
             st.setValue(f"pr_{k}", o[k])
 

@@ -1,4 +1,5 @@
 # חלון הגדרת מידות חור (רצפה / תקרה / קיר)
+import brand
 from PySide6.QtCore import Qt, QTimer, QSettings
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (QComboBox, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
@@ -45,7 +46,7 @@ class HoleDialog(QDialog):
         self.kind = kind
         self.setWindowTitle(KIND_NAME[kind])
         self.setLayoutDirection(Qt.RightToLeft)
-        st = QSettings("Tiktin", "TiktinPDF")
+        st = QSettings(*brand.ORG)
         base = dict(DEFAULTS[kind])
         saved = st.value(f"hole_{kind}")
         if isinstance(saved, dict):
@@ -150,5 +151,5 @@ class HoleDialog(QDialog):
             if "h" in out:
                 out["h"] = out["w"]
         self.result_dims = out
-        QSettings("Tiktin", "TiktinPDF").setValue(f"hole_{self.kind}", out)
+        QSettings(*brand.ORG).setValue(f"hole_{self.kind}", out)
         self.accept()

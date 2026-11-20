@@ -1,4 +1,5 @@
 # חלון סיבוב עמודים: עמוד נוכחי או כל העמודים, עם/נגד כיוון השעון, או מצב סופי לאורך/לרוחב
+import brand
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QButtonGroup, QWidget)
 
@@ -8,7 +9,7 @@ class RotateDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("סיבוב עמודים")
         self.setLayoutDirection(Qt.RightToLeft)
-        st = QSettings("Tiktin", "TiktinPDF")
+        st = QSettings(*brand.ORG)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 18, 20, 18)
         lay.setSpacing(14)
@@ -80,7 +81,7 @@ class RotateDialog(QDialog):
 
     def _ok(self):
         g = {k: v.checkedButton().property("key") for k, v in self.groups.items()}
-        st = QSettings("Tiktin", "TiktinPDF")
+        st = QSettings(*brand.ORG)
         st.setValue("rot_scope", g["scope"])
         st.setValue("rot_mode", g["mode"])
         st.setValue("rot_dir", g["dir"])

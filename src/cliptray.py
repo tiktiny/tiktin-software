@@ -139,8 +139,12 @@ class ClipItem(QFrame):
         m.exec(ev.globalPos())
 
 
+_SHARED = []            # הקטעים שהועתקו — משותפים לכל הכרטיסיות והחלונות
+_TRAYS = []             # כל המגשים הפתוחים (אחד לכל כרטיסייה)
+
+
 class ClipTray(QWidget):
-    """מגש צף בפינת השרטוט."""
+    """מגש צף בפינת השרטוט. הקטעים משותפים: קטע שהועתק בחלון אחד מופיע במגש של כל כרטיסייה וכל חלון."""
     message = Signal(str)
 
     def __init__(self, parent):
@@ -152,30 +156,57 @@ class ClipTray(QWidget):
         self.lay.setSpacing(6)
         self.items = []
         self.hide()
+        _TRAYS.append(self)
+        self.destroyed.connect(lambda *_, t=self: _TRAYS.remove(t) if t in _TRAYS else None)
+        if _SHARED:
+            self._sync()
 
     def add(self, clip):
-        if len(self.items) >= MAX_CLIPS:
-            self._remove(self.items[0])
-        it = ClipItem(self, clip)
-        it.removed.connect(self._remove)
-        it.copied.connect(self.message)
-        self.items.append(it)
-        self.lay.addWidget(it)
+        _SHARED.append(clip)
+        del _SHARED[:-MAX_CLIPS]
+        for t in list(_TRAYS):
+            try:
+                t._sync(flash=clip if t is self else None)
+            except RuntimeError:          # מגש של כרטיסייה שנסגרה
+                if t in _TRAYS:
+                    _TRAYS.remove(t)
+
+    def _remove(self, it):
+        if it.clip in _SHARED:
+            _SHARED.remove(it.clip)
+        for t in list(_TRAYS):
+            try:
+                t._sync()
+            except RuntimeError:
+                if t in _TRAYS:
+                    _TRAYS.remove(t)
+
+    def _sync(self, flash=None):
+        have = {id(w.clip): w for w in self.items}
+        for w in list(self.items):
+            if w.clip not in _SHARED:
+                self.items.remove(w)
+                w.hide()
+                w.deleteLater()
+                # הקובץ לא נמחק כאן — אולי הוא עדיין בלוח ההעתקה; קבצים ישנים נמחקים בהפעלה הבאה
+        new = None
+        for clip in _SHARED:
+            if id(clip) not in have:
+                w = ClipItem(self, clip)
+                w.removed.connect(self._remove)
+                w.copied.connect(self.message)
+                self.items.append(w)
+                self.lay.addWidget(w)
+                if clip is flash:
+                    new = w
+        if not self.items:
+            self.hide()
+            return
         self._place()
         self.show()
         self.raise_()
-        it.flash()
-
-    def _remove(self, it):
-        if it in self.items:
-            self.items.remove(it)
-            it.hide()
-            it.deleteLater()
-            # הקובץ לא נמחק כאן — אולי הוא עדיין בלוח ההעתקה; קבצים ישנים נמחקים בהפעלה הבאה
-        if not self.items:
-            self.hide()
-        else:
-            self._place()
+        if new is not None:
+            new.flash()
 
     def _place(self):
         self.adjustSize()
@@ -183,7 +214,6 @@ class ClipTray(QWidget):
         if p is not None:
             # פינה שמאלית-תחתונה של אזור השרטוט
             self.move(12, p.height() - self.sizeHint().height() - 26)
-
 
 
 TRAY_STYLE = """

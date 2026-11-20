@@ -8,7 +8,8 @@ if __name__ == "__main__":
     # אם התוכנה כבר פתוחה: מעבירים אליה את הקובץ (ייפתח שם ככרטיסייה) ויוצאים מיד
     try:
         import single
-        if single.send_to_running([a for a in sys.argv[1:] if not a.startswith("-")]):
+        import brand
+        if single.send_to_running([a for a in sys.argv[1:] if not a.startswith("-")], brand.PIPE_TAG):
             sys.exit(0)
     except Exception:
         pass

@@ -1,11 +1,12 @@
 # חותמות: חותמת לוחות ריקה מובנית + עד 3 חותמות נוספות (מתמונה או מ-PDF, עם שם קבוע, רק במחשב הזה),
 # צביעה בשחור או אדום, וחיפוש מקום פנוי בכל עמוד.
+import brand
 import base64
 from PySide6.QtCore import Qt, QSettings, QBuffer, QByteArray, QIODevice
 from PySide6.QtGui import QImage, QPainter, QColor
 from default_stamps import STAMPS as BUILTIN
 
-FIXED = (5, 1)          # החותמות הקבועות: חותמת לוחות ריקה, חותמת טיקטין לאישור ציוד (בלי חתימה — מטעמי אבטחה)
+FIXED = () if brand.COMMERCIAL else (5, 1)          # החותמות הקבועות: חותמת לוחות ריקה, חותמת טיקטין לאישור ציוד (בלי חתימה — מטעמי אבטחה)
 CUSTOM = (3, 4, 6)      # מקומות לחותמות נוספות — נשמרות רק במחשב של המשתמש
 
 MAX_SIDE = 900
@@ -16,7 +17,7 @@ _extra = {}       # חותמות שנטענו מתוך קובץ PDF (מפתח ->
 
 
 def _st():
-    return QSettings("Tiktin", "TiktinPDF")
+    return QSettings(*brand.ORG)
 
 
 def make_mask(img, want_offset=False):
