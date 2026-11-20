@@ -328,6 +328,9 @@ class PdfView(QAbstractScrollArea):
         self.shape_start = None
         self.stamp_job = None
         self.stamp_pending = None
+        self._auto_fit = None
+        self._refit_timer = QTimer(self, singleShot=True, interval=30)
+        self._refit_timer.timeout.connect(self._refit)
         self._links = {}
         self._link_press = None    # (עמוד, חותמת) — החותמת הראשונה של "כל העמודים", לפני השכפול
         self.erase_rect = None       # (עמוד, מלבן) של מחיקת אזור שעוד לא אושרה
@@ -472,9 +475,11 @@ class PdfView(QAbstractScrollArea):
         return out
 
     # ----- zoom
-    def set_zoom(self, z, anchor=None):
+    def set_zoom(self, z, anchor=None, user=True):
         if not self.sizes:
             return
+        if user:
+            self._auto_fit = None       # המשתמש בחר גודל — לא מתאימים מחדש בשינוי גודל החלון
         z = max(MIN_ZOOM, min(MAX_ZOOM, z))
         if abs(z - self.zoom) < 1e-9:
             return
@@ -501,6 +506,10 @@ class PdfView(QAbstractScrollArea):
         self.viewport().update()
 
     def _fit_zoom(self, page_mode):
+        self._fit_vp = (self.viewport().width(), self.viewport().height())
+        return self._fit_zoom_calc(page_mode)
+
+    def _fit_zoom_calc(self, page_mode):
         if not self.sizes:
             return None
         i = max(0, self._cur_page)
@@ -514,17 +523,28 @@ class PdfView(QAbstractScrollArea):
         if z is None:
             return
         i = max(0, self._cur_page)
-        self.set_zoom(z)
+        self._auto_fit = "page"
+        self.set_zoom(z, user=False)
         r = self.page_rect(i)
         self.verticalScrollBar().setValue(int(r.y() - MARGIN))
         if instant:
             self._settle_zoom()
 
+    def _refit(self):
+        mode = self._auto_fit
+        if not mode or not self.sizes:
+            return
+        if mode == "page":
+            self.fit_page(instant=True)
+        else:
+            self.fit_width(instant=True)
+
     def fit_width(self, instant=False):
         z = self._fit_zoom(False)
         if z is None:
             return
-        self.set_zoom(z)
+        self._auto_fit = "width"
+        self.set_zoom(z, user=False)
         if instant:
             self._settle_zoom()
 
@@ -779,6 +799,14 @@ class PdfView(QAbstractScrollArea):
     # ----- events
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
+        # קובץ שנפתח לפני שהחלון קיבל את גודלו הסופי (פתיחה מהקובץ, כרטיסייה חדשה, הגדלת החלון):
+        # ממשיכים להתאים אותו למסך עד שהמשתמש משנה את הגודל בעצמו
+        if getattr(self, "_auto_fit", None) and self.sizes:
+            # רק שינוי גודל אמיתי — לא פס גלילה שמופיע ונעלם (זה היה גורם לציור מחדש מיותר)
+            fw, fh = getattr(self, "_fit_vp", (0, 0))
+            vp = self.viewport()
+            if abs(vp.width() - fw) > 40 or abs(vp.height() - fh) > 40:
+                self._refit_timer.start()
         if getattr(self, "tray", None) is not None and self.tray.isVisible():
             self.tray._place()
         self._update_scrollbars()
