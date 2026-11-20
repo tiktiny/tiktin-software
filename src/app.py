@@ -1,3 +1,4 @@
+import brand
 import os
 import sys
 import math
@@ -35,7 +36,7 @@ from cliptray import ClipTray, TRAY_STYLE
 import marks_store
 from ribbon import RibbonButton, RIBBON_STYLE
 
-APP_NAME = "טיקטין PDF A"
+APP_NAME = brand.APP_NAME
 TILE = 512                 # גודל אריח בפיקסלים של המסך
 MARGIN = 16                # שוליים סביב העמודים
 GAP = 12                   # רווח בין עמודים
@@ -262,6 +263,10 @@ class PdfView(QAbstractScrollArea):
         pool.tile_ready.connect(self._on_tile)
         self.setLayoutDirection(Qt.LeftToRight)
         self.viewport().setMouseTracking(True)
+        # מסך מגע: אצבע אחת גוררת (כמו עכבר), שתי אצבעות — צביטה להגדלה והקטנה והזזה
+        self.viewport().setAttribute(Qt.WA_AcceptTouchEvents, True)
+        self.viewport().grabGesture(Qt.PinchGesture)
+        self._pinch = None
         self.setFrameShape(QAbstractScrollArea.NoFrame)
         self.setFocusPolicy(Qt.StrongFocus)
         self.doc = None
@@ -284,7 +289,7 @@ class PdfView(QAbstractScrollArea):
         self._sel = None            # (נקודת התחלה, נקודה נוכחית) בקואורדינטות תוכן
         self.items = {}             # עמוד -> רשימת סימונים
         self.scales = {}            # עמוד -> קנ"מ (50 = 1:50)
-        self.default_scale = QSettings("Tiktin", "TiktinPDF").value("default_scale", 50.0, type=float)
+        self.default_scale = QSettings(*brand.ORG).value("default_scale", 50.0, type=float)
         self.tool = "pan"
         self.template = None
         self.hole_kind = None
@@ -301,7 +306,7 @@ class PdfView(QAbstractScrollArea):
         self.overlay_version = 0
         self._resize = None
         self.select_purpose = "print"
-        st = QSettings("Tiktin", "TiktinPDF")
+        st = QSettings(*brand.ORG)
         self.pen_color = st.value("pen_color", "#d0021b")
         if QColor(self.pen_color).name() not in ("#d0021b", "#000000"):
             self.pen_color = "#d0021b"
@@ -322,7 +327,9 @@ class PdfView(QAbstractScrollArea):
         self.analyze_timer.timeout.connect(self._request_analysis)
         self.shape_start = None
         self.stamp_job = None
-        self.stamp_pending = None    # (עמוד, חותמת) — החותמת הראשונה של "כל העמודים", לפני השכפול
+        self.stamp_pending = None
+        self._links = {}
+        self._link_press = None    # (עמוד, חותמת) — החותמת הראשונה של "כל העמודים", לפני השכפול
         self.erase_rect = None       # (עמוד, מלבן) של מחיקת אזור שעוד לא אושרה
         self._seg_cache = {}         # עמוד -> קטעי קווים לחיפוש "פריט בודד" (נבנה רק בשימוש)
         self._ink_cache = {}         # (מסמך, עמוד) -> מפת דיו למציאת מקום פנוי לחותמת
@@ -352,6 +359,8 @@ class PdfView(QAbstractScrollArea):
         self.pw = pw
         self.docgen = next(_DOCGEN)
         self.sizes = [(r.width, r.height) for r in (doc[i].rect for i in range(doc.page_count))]
+        self._links = {}             # עמוד -> קישורים (נקראים רק כשהעכבר עובר על העמוד)
+        self._link_press = None
         self.cum = [0.0]
         for _, h in self.sizes:
             self.cum.append(self.cum[-1] + h)
@@ -790,6 +799,32 @@ class PdfView(QAbstractScrollArea):
                 if i not in self._asked:
                     self.analyze_timer.start()
 
+    def viewportEvent(self, ev):
+        if ev.type() == QEvent.Gesture:
+            g = ev.gesture(Qt.PinchGesture)
+            if g is not None and self.sizes:
+                self._on_pinch(g)
+                ev.accept()
+                return True
+        return super().viewportEvent(ev)
+
+    def _on_pinch(self, g):
+        st = g.state()
+        if st == Qt.GestureStarted or self._pinch is None:
+            self._pinch = self.zoom
+            self._drag = None               # האצבע הראשונה כבר התחילה גרירה — מבטלים אותה
+        c = QPointF(self.viewport().mapFromGlobal(g.centerPoint().toPoint()))
+        z0 = self._pinch
+        f = g.totalScaleFactor() or 1.0
+        if abs(f - 1.0) > 0.01:
+            self.set_zoom(max(0.02, z0 * f), c)
+        d = g.centerPoint() - g.lastCenterPoint()
+        if st != Qt.GestureStarted and (d.x() or d.y()):
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(d.x()))
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(d.y()))
+        if st in (Qt.GestureFinished, Qt.GestureCanceled):
+            self._pinch = None
+
     def wheelEvent(self, ev):
         if not self.sizes:
             return
@@ -903,7 +938,7 @@ class PdfView(QAbstractScrollArea):
     def set_scale(self, i, S):
         self.scales[i] = S
         self.default_scale = S
-        QSettings("Tiktin", "TiktinPDF").setValue("default_scale", S)
+        QSettings(*brand.ORG).setValue("default_scale", S)
         self._save_scales()
         self.viewport().update()
 
@@ -913,12 +948,12 @@ class PdfView(QAbstractScrollArea):
 
     def _save_scales(self):
         if self.path:
-            QSettings("Tiktin", "TiktinPDF").setValue(
+            QSettings(*brand.ORG).setValue(
                 self._scale_key(), ",".join(f"{k}:{v:g}" for k, v in self.scales.items()))
 
     def _load_scales(self):
         self.scales = {}
-        raw = QSettings("Tiktin", "TiktinPDF").value(self._scale_key(), "")
+        raw = QSettings(*brand.ORG).value(self._scale_key(), "")
         for part in str(raw or "").split(","):
             if ":" in part:
                 k, v = part.split(":")
@@ -1059,7 +1094,7 @@ class PdfView(QAbstractScrollArea):
         if not result:
             doc2.close()
             return result
-        d = os.path.join(tempfile.gettempdir(), "TiktinPDF-work")
+        d = os.path.join(tempfile.gettempdir(), brand.TMP + "-work")
         os.makedirs(d, exist_ok=True)
         tmp = os.path.join(d, uuid.uuid4().hex + ".pdf")
         doc2.save(tmp)
@@ -1235,7 +1270,7 @@ class PdfView(QAbstractScrollArea):
         if doc2.needs_pass:
             doc2.authenticate(self.pw or "")
         doc2.delete_pages(pages)
-        d = os.path.join(tempfile.gettempdir(), "TiktinPDF-work")
+        d = os.path.join(tempfile.gettempdir(), brand.TMP + "-work")
         os.makedirs(d, exist_ok=True)
         tmp = os.path.join(d, uuid.uuid4().hex + ".pdf")
         doc2.save(tmp, garbage=1)
@@ -1364,7 +1399,7 @@ class PdfView(QAbstractScrollArea):
         for i, d in plan.items():
             pg = doc2[i]
             pg.set_rotation((pg.rotation + d) % 360)
-        dd = os.path.join(tempfile.gettempdir(), "TiktinPDF-work")
+        dd = os.path.join(tempfile.gettempdir(), brand.TMP + "-work")
         os.makedirs(dd, exist_ok=True)
         tmp = os.path.join(dd, uuid.uuid4().hex + ".pdf")
         doc2.save(tmp)
@@ -1609,7 +1644,7 @@ class PdfView(QAbstractScrollArea):
         return ink
 
     def stamp_auto_w(self, i, slot):
-        k = QSettings("Tiktin", "TiktinPDF").value(f"stamp_k{slot}", 1.0, type=float) if isinstance(slot, int) else 1.0
+        k = QSettings(*brand.ORG).value(f"stamp_k{slot}", 1.0, type=float) if isinstance(slot, int) else 1.0
         return stamps.auto_width_mm(slot, self._page_ink(i), min(max(k, 0.3), 4.0))
 
     def _stamp_fit(self, i, it, autosize=False):
@@ -1931,6 +1966,9 @@ class PdfView(QAbstractScrollArea):
             if self.selected:
                 self.selected = None
                 self.viewport().update()
+        if ev.button() == Qt.LeftButton and self.tool == "pan":
+            lk = self._link_at(ev.position())
+            self._link_press = (ev.position(), lk) if lk else None
         if ev.button() in (Qt.LeftButton, Qt.MiddleButton):
             self._drag = (ev.position(), self.horizontalScrollBar().value(),
                           self.verticalScrollBar().value())
@@ -1938,6 +1976,8 @@ class PdfView(QAbstractScrollArea):
             ev.accept()
 
     def mouseMoveEvent(self, ev):
+        if self._pinch is not None:          # בזמן צביטה במסך מגע — לא גוררים ולא מציירים
+            return
         if self.tool == "erase_rect" and self._erase_drag and self.erase_rect:
             (kind, hh), p0, r0 = self._erase_drag
             i, _ = self.erase_rect
@@ -2006,17 +2046,17 @@ class PdfView(QAbstractScrollArea):
                         try:
                             ink = self._page_ink(i)
                             auto = stamps.auto_width_mm(sl, ink, 1.0)
-                            QSettings("Tiktin", "TiktinPDF").setValue(
+                            QSettings(*brand.ORG).setValue(
                                 f"stamp_k{sl}", min(max(self.items[i][idx]["w"] / max(auto, 0.1), 0.3), 4.0))
                         except Exception:
                             pass
                 elif orig["type"] == "mark":
-                    QSettings("Tiktin", "TiktinPDF").setValue("mark_s", self.items[i][idx]["s"])
+                    QSettings(*brand.ORG).setValue("mark_s", self.items[i][idx]["s"])
             elif orig["type"] == "text":
                 A.resize_text(self.items[i][idx], orig, hh, pt)
             elif orig["type"] == "trafo":
                 A.resize_trafo(self.items[i][idx], orig, hh, pt)
-                QSettings("Tiktin", "TiktinPDF").setValue("trafo_w", self.items[i][idx]["w"])
+                QSettings(*brand.ORG).setValue("trafo_w", self.items[i][idx]["w"])
             else:
                 A.resize_hole(self.items[i][idx], orig, hh, pt, self.scale_of(i))
             self.viewport().update()
@@ -2077,6 +2117,15 @@ class PdfView(QAbstractScrollArea):
                 hit = self._hit_item(ev.position())
                 if self.tool == "text":
                     hit = hit if hit and self.items[hit[0]][hit[1]]["type"] == "text" else None
+                lk = None if hit or self.tool != "pan" or ev.buttons() else self._link_at(ev.position())
+                if lk:
+                    self.viewport().setCursor(Qt.PointingHandCursor)
+                    tip = lk.get("uri") or f"מעבר לעמוד {lk['page'] + 1}"
+                    if getattr(self, "_link_tip", None) != tip:
+                        self._link_tip = tip
+                        self.status.emit("קישור: " + tip + "  (לחיצה פותחת)")
+                    return
+                self._link_tip = None
                 self.viewport().setCursor(Qt.SizeAllCursor if hit else
                                           (Qt.OpenHandCursor if self.tool == "pan" else Qt.IBeamCursor))
 
@@ -2120,12 +2169,53 @@ class PdfView(QAbstractScrollArea):
             if p and ri == p[0] and ridx < len(self.items.get(ri, [])) and self.items[ri][ridx] is p[1] \
                     and abs(self._resize[3].get("w", 0) - p[1].get("w", 0)) > 0.01:
                 QTimer.singleShot(0, self.ask_duplicate_stamp)
+        lp, self._link_press = self._link_press, None
+        if lp and ev.button() == Qt.LeftButton and self.tool == "pan":
+            d = ev.position() - lp[0]
+            if abs(d.x()) + abs(d.y()) < 6:       # לחיצה (לא גרירה) על קישור
+                QTimer.singleShot(0, lambda lk=lp[1]: self._open_link(lk))
         self._erasing = False
         self._move = None
         self._resize = None
         self._drag = None
         if self.tool == "pan":
             self.viewport().setCursor(Qt.OpenHandCursor if self.sizes else Qt.ArrowCursor)
+
+    # ----- קישורים בקובץ (לאתר, למייל או לעמוד אחר)
+    def _link_at(self, pos):
+        if not self.sizes or self.doc is None:
+            return None
+        try:
+            i, pt = self.to_page(pos)
+        except Exception:
+            return None
+        if not 0 <= i < len(self.sizes):
+            return None
+        links = self._links.get(i)
+        if links is None:
+            try:
+                links = [(tuple(lk["from"]), lk) for lk in self.doc[i].get_links()
+                         if lk.get("uri") or lk.get("page") is not None]
+            except Exception:
+                links = []
+            self._links[i] = links
+        x, y = pt.x(), pt.y()
+        for (x0, y0, x1, y1), lk in links:
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return lk
+        return None
+
+    def _open_link(self, lk):
+        uri = lk.get("uri")
+        if uri:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            u = QUrl(uri) if "://" in uri or uri.lower().startswith("mailto:") else QUrl("https://" + uri)
+            QDesktopServices.openUrl(u)
+            self.status.emit("פתיחת הקישור: " + uri)
+        elif lk.get("page") is not None and 0 <= lk["page"] < len(self.sizes):
+            self.go_page(lk["page"])
+            self.status.emit(f"מעבר לעמוד {lk['page'] + 1}")
 
     def mouseDoubleClickEvent(self, ev):
         if not self.sizes or ev.button() != Qt.LeftButton:
@@ -2256,8 +2346,8 @@ class MainWindow(QMainWindow):
         if secondary:
             self.setAttribute(Qt.WA_DeleteOnClose)
         self.split_v = None                 # הקובץ שמוצג בצד השני של התצוגה המפוצלת
-        self.settings = QSettings("Tiktin", "TiktinPDF")
-        self.setWindowTitle(f"{APP_NAME}   |   גרסה {VERSION} ({BUILD_DATE})")
+        self.settings = QSettings(*brand.ORG)
+        self.setWindowTitle(f"{APP_NAME} {brand.EDITION}   |   גרסה {VERSION} ({BUILD_DATE})")
         self.setAcceptDrops(True)
         # כל קובץ פתוח הוא כרטיסייה עם שם הקובץ; כולן חולקות את אותם תהליכי רינדור
         self.pool = pool
@@ -2805,7 +2895,7 @@ class MainWindow(QMainWindow):
         self.file_lbl = QLabel("")
         self.file_lbl.setObjectName("filename")
         hd.addWidget(self.file_lbl)
-        hver = QLabel(f"גרסה {VERSION} · עודכן {BUILD_DATE}")
+        hver = QLabel(f"{brand.EDITION} · גרסה {VERSION} · עודכן {BUILD_DATE}")
         hver.setObjectName("hver")
         hd.addWidget(hver)
         hsp = QWidget()
@@ -3053,18 +3143,20 @@ class MainWindow(QMainWindow):
                   "הקובץ הנוכחי עובר לחלון משלו (למסך שני). אפשר גם לגרור את הכרטיסייה החוצה")
         vm.addSeparator()
         self._act(vm, "הוראות הפעלה", self.show_help, shortcut="F1")
-        gm = self._menu(self)
-        self._act(gm, "פתיחה באפליקציית התקן הירוק", self._green_web,
-                  "פותח את אפליקציית \"מילוי אוטומטי של תקן ירוק\" בדפדפן, כשהטופס הפתוח כבר טעון בה")
-        self.green_btn = self._menu_btn("תקן ירוק", "מילוי הצהרת חשמל לתקן בנייה ירוקה (ת\"י 5281) על הטופס הפתוח", gm)
-        tb.addWidget(self.green_btn)
-        tb.addSeparator()
+        if not brand.COMMERCIAL:           # תקן ירוק — כלי של משרד טיקטין בלבד
+            gm = self._menu(self)
+            self._act(gm, "פתיחה באפליקציית התקן הירוק", self._green_web,
+                      "פותח את אפליקציית \"מילוי אוטומטי של תקן ירוק\" בדפדפן, כשהטופס הפתוח כבר טעון בה")
+            self.green_btn = self._menu_btn("תקן ירוק", "מילוי הצהרת חשמל לתקן בנייה ירוקה (ת\"י 5281) על הטופס הפתוח", gm)
+            tb.addWidget(self.green_btn)
+            tb.addSeparator()
         tb.addWidget(self._menu_btn("תצוגה", "התאמה לרוחב, 100%, מצב גלגלת ומסך מלא", vm))
         tb.addWidget(self._btn("מסך מלא", "השרטוט על כל המסך, בלי הסרגלים (F11). Esc או F11 חוזרים", self._toggle_full,
                                icon="full"))
         tb.addWidget(self._btn("הוראות\nF1", "הוראות ההפעלה של התוכנה (F1)", self.show_help, icon="help"))
-        tb.addWidget(self._btn("אפליקציה\nראשית", "פתיחת האפליקציה הראשית של טיקטין בדפדפן", self._open_portal,
-                               icon="home"))
+        if brand.PORTAL:
+            tb.addWidget(self._btn("אפליקציה\nראשית", "פתיחת האפליקציה הראשית של טיקטין בדפדפן", self._open_portal,
+                                   icon="home"))
         ver = QLabel(f" גרסה {VERSION} | {BUILD_DATE} ")
         ver.setObjectName("ver")
         ver.setToolTip(f"גרסה {VERSION}, עודכנה {BUILD_DATE}. F1 = הוראות הפעלה")
@@ -3377,7 +3469,7 @@ class MainWindow(QMainWindow):
     def _open_portal(self):
         from PySide6.QtGui import QDesktopServices
         from PySide6.QtCore import QUrl
-        QDesktopServices.openUrl(QUrl("https://tiktiny.github.io/tiktin-tools/"))
+        QDesktopServices.openUrl(QUrl(brand.PORTAL))
 
     def _wheel_mode(self, on):
         self.view.wheel_zoom = on
@@ -3433,7 +3525,7 @@ class MainWindow(QMainWindow):
 
     def _pen_color(self, c):
         self.view.pen_color = c
-        QSettings("Tiktin", "TiktinPDF").setValue("pen_color", c)
+        QSettings(*brand.ORG).setValue("pen_color", c)
         v = self.view
         ref = v.editing or v.selected
         if ref:
@@ -3452,7 +3544,7 @@ class MainWindow(QMainWindow):
         s = self.tsize_box.currentData()
         v = self.view
         v.text_size = s
-        QSettings("Tiktin", "TiktinPDF").setValue("text_size", s)
+        QSettings(*brand.ORG).setValue("text_size", s)
         ref = v.editing or v.selected
         if ref:
             it = v.items[ref[0]][ref[1]]
@@ -3468,7 +3560,7 @@ class MainWindow(QMainWindow):
     def _pen_width(self, *_):
         w = self.width_box.currentData()
         self.view.pen_w = w
-        QSettings("Tiktin", "TiktinPDF").setValue("pen_w", w)
+        QSettings(*brand.ORG).setValue("pen_w", w)
         v = self.view
         if v.selected:
             i, idx = v.selected
@@ -3524,7 +3616,7 @@ class MainWindow(QMainWindow):
         pg = out.new_page(width=clip.width, height=clip.height)
         pg.show_pdf_page(pg.rect, one, 0, clip=clip)
         # כל קטע בתיקייה משלו, כדי שלקובץ יהיה שם נקי (זה השם שהנמען רואה)
-        d = os.path.join(tempfile.gettempdir(), "TiktinPDF-clips", uuid.uuid4().hex[:8])
+        d = os.path.join(tempfile.gettempdir(), brand.TMP + "-clips", uuid.uuid4().hex[:8])
         os.makedirs(d, exist_ok=True)
         base = os.path.splitext(os.path.basename(v.path or "קטע"))[0]
         name = f"{base} - עמוד {i + 1} - קטע.pdf"
@@ -3552,7 +3644,7 @@ class MainWindow(QMainWindow):
 
     def _on_changed(self):
         name = os.path.basename(self.view.path or "")
-        self.setWindowTitle(f"{'* ' if self.view.dirty else ''}{name} – {APP_NAME}   |   גרסה {VERSION} ({BUILD_DATE})")
+        self.setWindowTitle(f"{'* ' if self.view.dirty else ''}{name} – {APP_NAME} {brand.EDITION}   |   גרסה {VERSION} ({BUILD_DATE})")
         self.file_lbl.setText(("* " if self.view.dirty else "") + name)
 
     def _show_scale(self, *_):
@@ -3617,7 +3709,7 @@ class MainWindow(QMainWindow):
             box.setWindowTitle(APP_NAME)
             box.setIcon(QMessageBox.Question)
             box.setText("השינויים יישמרו בתוך הקובץ:\n" + os.path.basename(v.path) +
-                        "\n\nהסימונים יופיעו בכל תוכנה, ובטיקטין PDF אפשר יהיה לחזור ולשנות או למחוק אותם. להמשיך?")
+                        "\n\nהסימונים יופיעו בכל תוכנה, ובתוכנה הזו אפשר יהיה לחזור ולשנות או למחוק אותם. להמשיך?")
             from PySide6.QtWidgets import QCheckBox
             cb = QCheckBox("לא לשאול שוב")
             box.setCheckBox(cb)
@@ -4128,7 +4220,7 @@ def _clean_temp():
     """מנקה קבצים זמניים (עמודים שנמחקו, קטעים שהועתקו) שנשארו מלפני יותר מיומיים."""
     import tempfile
     import time
-    for sub in ("TiktinPDF-work", "TiktinPDF-clips"):
+    for sub in (brand.TMP + "-work", brand.TMP + "-clips"):
         d = os.path.join(tempfile.gettempdir(), sub)
         try:
             for f in os.listdir(d):
@@ -4147,7 +4239,7 @@ def main():
     if sys.platform == "win32":
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Tiktin.PDF")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(brand.APP_ID)
         except Exception:
             pass
     pymupdf.TOOLS.set_graphics_min_line_width(1.0)   # קווים דקים כהים וברורים (גם בהדפסה)
@@ -4178,7 +4270,7 @@ def main():
     # מכאן והלאה: הפעלה נוספת של התוכנה על קובץ שולחת אותו לחלון הזה, והוא נפתח ככרטיסייה
     try:
         import single
-        srv = single.start_server(win.files_arrived.emit)
+        srv = single.start_server(win.files_arrived.emit, brand.PIPE_TAG)
     except Exception:
         srv = None
     QTimer.singleShot(3000, _clean_temp)
