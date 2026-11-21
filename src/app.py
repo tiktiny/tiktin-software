@@ -4292,6 +4292,14 @@ def main():
     pool.start()
     win = MainWindow(pool)
     win.show()
+    try:   # דיווח שימוש אנונימי לדוח היומי (ברקע, אחרי שהחלון כבר פתוח)
+        import usage_ping, uuid
+        _st = QSettings(*brand.ORG)
+        _vid = _st.value("usage_vid") or uuid.uuid4().hex[:8]
+        _st.setValue("usage_vid", _vid)
+        usage_ping.ping(f"{brand.APP_NAME} {brand.EDITION}", f"{brand.APP_NAME} {brand.EDITION} {VERSION}", _vid)
+    except Exception:
+        pass
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     if args:
         QTimer.singleShot(0, lambda: [win.open_path(a) for a in args])

@@ -155,6 +155,8 @@ a { color: #0057b8; text-decoration: none; }
 <tr><td class="k">Esc</td><td>סיום הכלי הפעיל (גם מדידה) / ביטול בחירה</td></tr>
 <tr><td class="k">PageUp / PageDown / Home / End</td><td>מעבר בין עמודים</td></tr>
 </table>
+
+<p style="color:#777;font-size:12px">בפתיחת התוכנה נשלח דיווח שימוש אנונימי (שם התוכנה, גרסה, סוג המכשיר ומיקום משוער) — בלי שמות משתמשים ובלי שמות קבצים.</p>
 """
 
 
