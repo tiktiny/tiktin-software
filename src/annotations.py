@@ -140,6 +140,8 @@ def label_rect(it, S):
 
 
 def item_bbox(it, S):
+    if it["type"] in M.TYPES:
+        return M.bbox(it, S)
     if it.get("angle") and it["type"] != "hole":
         from annotations_extra import rot_bbox
         return rot_bbox(it)
@@ -155,6 +157,8 @@ def item_bbox(it, S):
 
 
 def hit(it, pt, S, tol):
+    if it["type"] in M.TYPES:
+        return M.hit(it, pt, S, tol)
     if it.get("angle") and it["type"] != "hole":
         from annotations_extra import to_local
         pt = to_local(it, pt)
@@ -178,6 +182,9 @@ def hit(it, pt, S, tol):
 
 
 def move(it, dx, dy):
+    if it["type"] in M.TYPES:
+        M.move(it, dx, dy)
+        return
     if it["type"] == "shape":
         it["p1"] = (it["p1"][0] + dx, it["p1"][1] + dy)
         it["p2"] = (it["p2"][0] + dx, it["p2"][1] + dy)
@@ -237,6 +244,9 @@ def _draw_label(p, it, S, color, white_bg):
 
 
 def paint_item(p, it, S, cosmetic=True, selected=False, ghost=False):
+    if it["type"] in M.TYPES:
+        M.paint(p, it, S, cosmetic, selected, ghost)
+        return
     if it.get("angle") and it["type"] not in ("hole", "dim", "ink", "text"):
         from annotations_extra import xform
         p.save()
@@ -351,7 +361,7 @@ def bake_page(page, items, S):
 
     shape = page.new_shape()
     for it in items:
-        if it["type"] in ("text", "trafo") or it["type"] in EXTRA:
+        if it["type"] in ("text", "trafo") or it["type"] in EXTRA or it["type"] in M.TYPES:
             continue
         if it["type"] == "ink":
             pts = [P(x, y) for x, y in it["pts"]]
@@ -394,6 +404,9 @@ def bake_page(page, items, S):
     shape.commit()
     for it in items:
         if it["type"] == "ink":
+            continue
+        if it["type"] in M.TYPES:
+            M.bake(page, it, S, m)
             continue
         if it.get("angle") and it["type"] in ("trafo", "mark", "stamp", "shape"):
             from annotations_extra import bake_rotated
@@ -756,3 +769,4 @@ def bake_trafo(page, it, m):
 
 
 from annotations_extra import EXTRA  # noqa: E402  (צורות, סימנים וחותמות)
+import measure as M  # noqa: E402  (מדידה רציפה, שטח, קו מידה ושרשרת)

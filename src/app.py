@@ -28,10 +28,12 @@ from text_dialog import HebrewKeyboard
 from inline_text import InlineText
 from colors import ColorButton
 import annotations as A
+import measure as M
 from annotations_extra import EXTRA, SHAPE_NAMES, MARK_NAMES
 import annotations_extra as AX
 import stamps
 from scale_detect import analyzer_main
+from snap_worker import snap_main
 from cliptray import ClipTray, TRAY_STYLE
 import marks_store
 from ribbon import RibbonButton, RIBBON_STYLE
@@ -43,6 +45,8 @@ GAP = 12                   # רווח בין עמודים
 CACHE_BYTES = 700 * 2**20  # תקרת זיכרון לאריחים מוכנים
 MIN_ZOOM, MAX_ZOOM = 0.02, 64.0
 CANVAS_BG = QColor("#d9dde3")
+MEASURE_TOOLS = ("dim", "calib", "pdim", "area", "ldim", "chain")
+NEW_MEASURE = ("pdim", "area", "ldim", "chain")   # כלי המדידה הנוספים (גרסת המשרד בלבד)
 ACCENT = "#c8202f"
 
 
@@ -246,6 +250,26 @@ class ScaleAnalyzer(QObject):
 
 
 # ---------------------------------------------------------------- viewer widget
+class SnapLoader(ScaleAnalyzer):
+    """תהליך רקע שקורא את קווי השרטוט להצמדת המדידה — הממשק לא נתקע גם בשרטוט כבד."""
+    def _start(self):
+        ctx = mp.get_context("spawn")
+        jr, self.jw = ctx.Pipe(duplex=False)
+        self.rr, rw = ctx.Pipe(duplex=False)
+        self.proc = ctx.Process(target=snap_main, args=(jr, rw), daemon=True)
+        self.proc.start()
+
+
+class _BadgeEdit(QLineEdit):
+    """תיבת עריכת הקנ"מ שנפתחת על הכיתוב בפינת השרטוט. Esc מבטל."""
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key_Escape:
+            self.setText("")
+            self.clearFocus()
+            return
+        super().keyPressEvent(ev)
+
+
 class PdfView(QAbstractScrollArea):
     page_changed = Signal(int, int)
     zoom_changed = Signal(float)
@@ -298,6 +322,19 @@ class PdfView(QAbstractScrollArea):
         self.calib = None
         self.selected = None
         self._move = None
+        self.mpts = None            # מדידה בתהליך (רציפה / שטח / קו מידה): (עמוד, [נקודות])
+        self.chain = None           # שרשרת מידות פעילה: {"i", "u", "d", "last"}
+        self._snapmark = None           # (עמוד, נקודה, סוג) – סימן ההצמדה ליד העכבר
+        self._snap_cache = {}       # עמוד -> קווי השרטוט להצמדה (נקראים ברקע רק כשמודדים בעמוד)
+        self._snap_gen = 0          # עולה בכל שינוי בשרטוט — תשובות ישנות מהרקע נזרקות
+        self._snap_req = set()
+        self.snaploader = SnapLoader()
+        self.snaploader.result.connect(self._on_snap_segments)
+        self._badge_rect = None
+        self._badge_edit = None
+        self._over_badge = False
+        if not hasattr(PdfView, "snap_on"):
+            PdfView.snap_on = (not brand.COMMERCIAL) and QSettings(*brand.ORG).value("snap_on", True, type=bool)
         self.undo = []
         self.redo = []
         self.src = None             # הקובץ שממנו קוראים בפועל (אחרי מחיקת עמודים: עותק זמני)
@@ -334,7 +371,7 @@ class PdfView(QAbstractScrollArea):
         self._links = {}
         self._link_press = None    # (עמוד, חותמת) — החותמת הראשונה של "כל העמודים", לפני השכפול
         self.erase_rect = None       # (עמוד, מלבן) של מחיקת אזור שעוד לא אושרה
-        self._seg_cache = {}         # עמוד -> קטעי קווים לחיפוש "פריט בודד" (נבנה רק בשימוש)
+        self._seg_cache = {}; self._snap_reset()         # עמוד -> קטעי קווים לחיפוש "פריט בודד" (נבנה רק בשימוש)
         self._ink_cache = {}         # (מסמך, עמוד) -> מפת דיו למציאת מקום פנוי לחותמת
         self._stamp_clean = True
         self._erase_drag = None
@@ -378,7 +415,7 @@ class PdfView(QAbstractScrollArea):
         self.pages_changed = False
         self.selected = None
         if src is None or src == path:
-            self._seg_cache = {}
+            self._seg_cache = {}; self._snap_reset()
         self._load_scales()
         self.auto_scales = {}
         self.scale_info = {}
@@ -697,6 +734,7 @@ class PdfView(QAbstractScrollArea):
     def paintEvent(self, ev):
         p = QPainter(self.viewport())
         p.fillRect(self.viewport().rect(), CANVAS_BG)
+        self._badge_rect = None
         if not self.sizes:
             p.setPen(QColor("#5a6270"))
             f = p.font()
@@ -774,6 +812,10 @@ class PdfView(QAbstractScrollArea):
             for loc, _ in self._erase_rect_handles():
                 p.drawRect(QRectF(loc.x() - hs, loc.y() - hs, 2 * hs, 2 * hs))
             p.restore()
+        if self._snapmark and self.tool in MEASURE_TOOLS:
+            si, sp, sk = self._snapmark
+            prr = self.page_rect(si)
+            M.paint_snap_marker(p, QPointF(prr.x() + sp.x() * self.zoom, prr.y() + sp.y() * self.zoom), sk)
         b = self.scale_badge(self._cur_page)
         if b:
             p.resetTransform()
@@ -781,13 +823,15 @@ class PdfView(QAbstractScrollArea):
             f.setPointSizeF(9.5)
             p.setFont(f)
             fm = p.fontMetrics()
-            w = fm.horizontalAdvance(b[0]) + 18
+            txt = b[0] if brand.COMMERCIAL else b[0] + "  ✎"
+            w = fm.horizontalAdvance(txt) + 18
             rr = QRectF(self.viewport().width() - w - 10, 8, w, fm.height() + 8)
-            p.setPen(QColor("#cfd4db"))
+            p.setPen(QColor("#c8202f") if self._over_badge and not brand.COMMERCIAL else QColor("#cfd4db"))
             p.setBrush(QColor(255, 255, 255, 235))
             p.drawRoundedRect(rr, 4, 4)
             p.setPen(QColor(b[1]))
-            p.drawText(rr, Qt.AlignCenter, b[0])
+            p.drawText(rr, Qt.AlignCenter, txt)
+            self._badge_rect = rr
         p.end()
 
     def _draw_tile(self, p, r, k, cur_s, smooth):
@@ -1013,6 +1057,11 @@ class PdfView(QAbstractScrollArea):
         self.erase_rect = None
         self._erase_drag = None
         self.calib = None
+        self.mpts = None
+        self.chain = None
+        self._snapmark = None
+        if tool in MEASURE_TOOLS and PdfView.snap_on and not brand.COMMERCIAL and self.sizes:
+            self._snap_segments(max(0, self._cur_page))
         if tool != "pan":
             self.selected = None
         cur = {"pan": Qt.OpenHandCursor if self.sizes else Qt.ArrowCursor, "text": Qt.IBeamCursor,
@@ -1099,7 +1148,7 @@ class PdfView(QAbstractScrollArea):
 
     def _restore_page_state(self, st):
         _, src, pw, items, scales, auto, changed = st
-        self._seg_cache = {}
+        self._seg_cache = {}; self._snap_reset()
         cur = self._reload_src(src, pw, keep_view=True)
         self.items, self.scales, self.auto_scales = items, scales, auto
         self.pages_changed = changed
@@ -1304,7 +1353,7 @@ class PdfView(QAbstractScrollArea):
         doc2.save(tmp, garbage=1)
         doc2.close()
         gone = set(pages)
-        self._seg_cache = {}
+        self._seg_cache = {}; self._snap_reset()
 
         def newidx(i):
             return i - sum(1 for p in pages if p < i)
@@ -1339,7 +1388,9 @@ class PdfView(QAbstractScrollArea):
         for it in items:
             it = dict(it)
             t = it["type"]
-            if t in ("dim", "shape"):
+            if t in M.TYPES:
+                M.transform(it, T)
+            elif t in ("dim", "shape"):
                 it["p1"], it["p2"] = T(*it["p1"]), T(*it["p2"])
             elif t == "ink":
                 it["pts"] = [T(x, y) for x, y in it["pts"]]
@@ -1419,7 +1470,7 @@ class PdfView(QAbstractScrollArea):
                     plan[i] = {90: 90, 180: 180, 270: -90}[r % 360]
         if not plan:
             return 0
-        self._seg_cache = {}
+        self._seg_cache = {}; self._snap_reset()
         st = self._page_state()
         doc2 = pymupdf.open(self.src)
         if doc2.needs_pass:
@@ -1507,6 +1558,230 @@ class PdfView(QAbstractScrollArea):
                 return QPointF(b.x(), a.y())
             return QPointF(a.x(), b.y())
         return b
+
+    # ----- כלי מדידה: הצמדה לקווי השרטוט (גרסת המשרד)
+    def _snap_active(self):
+        return PdfView.snap_on and not brand.COMMERCIAL and self.tool in MEASURE_TOOLS
+
+    def toggle_snap(self, on=None):
+        on = (not PdfView.snap_on) if on is None else bool(on)
+        PdfView.snap_on = on
+        QSettings(*brand.ORG).setValue("snap_on", on)
+        if not on:
+            self._snapmark = None
+        f = getattr(self.window(), "_sync_snap", None)
+        if f:
+            f()
+        self.status.emit("הצמדה לקווי השרטוט: " + ("פועלת" if on else "כבויה") + "  (F3 מחליף)")
+        self.viewport().update()
+
+    def _snap_reset(self):
+        self._snap_cache = {}
+        self._snap_req = set()
+        self._snap_gen = getattr(self, "_snap_gen", 0) + 1
+
+    def _on_snap_segments(self, gen, pno, cache):
+        if gen == self._snap_gen:
+            self._snap_cache[pno] = cache
+
+    def _snap_segments(self, i):
+        """קווי ההצמדה של העמוד, או None אם עוד נקראים ברקע (בינתיים מודדים בלי הצמדה)."""
+        cache = self._snap_cache.get(i)
+        if cache is None and i not in self._snap_req and self.src:
+            self._snap_req.add(i)
+            self.snaploader.request(self._snap_gen, self.src, self.pw, i)
+        return cache
+
+    def _measure_pt(self, ev, page=None, base=None):
+        """נקודת מדידה. Shift = קו ישר מנקודת הבסיס; אחרת הצמדה לקווי השרטוט (אם מופעלת)."""
+        i, pt = self.to_page(ev.position(), page=page)
+        if base is not None and ev.modifiers() & Qt.ShiftModifier:
+            self._snapmark = None
+            return i, self._ortho(base, pt, ev)
+        if not self._snap_active():
+            self._snapmark = None
+            return i, pt
+        r = None
+        try:
+            cache = self._snap_segments(i)
+            if cache is None:
+                self._snapmark = None
+                return i, pt
+            pg = self.doc[i]
+            dm = pg.derotation_matrix
+            q = pymupdf.Point(pt.x(), pt.y()) * dm
+            b = None
+            if base is not None:
+                bq = pymupdf.Point(base.x(), base.y()) * dm
+                b = (bq.x, bq.y)
+            r = M.find_snap(cache, q.x, q.y, 10.0 / self.zoom, b)
+            if r:
+                sq = pymupdf.Point(r[0], r[1]) * pg.rotation_matrix
+        except Exception:
+            r = None
+        if not r:
+            self._snapmark = None
+            return i, pt
+        sp = QPointF(sq.x, sq.y)
+        self._snapmark = (i, sp, r[2])
+        return i, sp
+
+    def _ldim_from(self, a, b, c, ortho=False):
+        """קו מידה בין a ל-b, כשקו המידה עובר ב-c. ortho = אופקי או אנכי לפי כיוון הגרירה."""
+        if math.hypot(b.x() - a.x(), b.y() - a.y()) < 0.5:
+            return None
+        u = None
+        if ortho:
+            mx, my = (a.x() + b.x()) / 2, (a.y() + b.y()) / 2
+            u = (1.0, 0.0) if abs(c.y() - my) >= abs(c.x() - mx) else (0.0, 1.0)
+        it = M.make_ldim((a.x(), a.y()), (b.x(), b.y()), (c.x(), c.y()), u, self.pen_color)
+        return it if M.ldim_geom(it)[2] >= 0.5 else None
+
+    def _multi_click(self, ev):
+        t = self.tool
+        if t == "chain" and self.chain:
+            c = self.chain
+            _, b = self._measure_pt(ev, page=c["i"], base=c["last"])
+            lp = c["last"]
+            if math.hypot(b.x() - lp.x(), b.y() - lp.y()) < 0.5:
+                return
+            self._push_undo()
+            self.items.setdefault(c["i"], []).append({"type": "ldim", "p1": (lp.x(), lp.y()), "p2": (b.x(), b.y()),
+                                                      "u": c["u"], "d": c["d"], "color": self.pen_color})
+            c["last"] = b
+            self.ghost = None
+            self.viewport().update()
+            return
+        if not self.mpts:
+            i, a = self._measure_pt(ev)
+            self.mpts = (i, [a])
+            self.viewport().update()
+            return
+        i, pts = self.mpts
+        if t in ("ldim", "chain") and len(pts) == 2:
+            _, c = self.to_page(ev.position(), page=i)
+            it = self._ldim_from(pts[0], pts[1], c, bool(ev.modifiers() & Qt.ShiftModifier))
+            self.mpts = None
+            self.ghost = None
+            if it is None:
+                return
+            self._push_undo()
+            self.items.setdefault(i, []).append(it)
+            if t == "chain":
+                self.chain = {"i": i, "u": it["u"], "d": it["d"], "last": pts[1]}
+                self.status.emit("שרשרת מידות: מקליקים על הנקודה הבאה. Enter, לחצן ימני או Esc מסיימים")
+            self.viewport().update()
+            return
+        _, b = self._measure_pt(ev, page=i, base=pts[-1])
+        if math.hypot(b.x() - pts[-1].x(), b.y() - pts[-1].y()) < 0.5:
+            return
+        if t == "area" and len(pts) >= 3 and math.hypot(b.x() - pts[0].x(), b.y() - pts[0].y()) <= 8.0 / self.zoom:
+            self._finish_multi()
+            return
+        pts.append(b)
+        self.viewport().update()
+
+    def _multi_move(self, ev):
+        t = self.tool
+        if t == "chain" and self.chain:
+            c = self.chain
+            _, b = self._measure_pt(ev, page=c["i"], base=c["last"])
+            lp = c["last"]
+            self.ghost = (c["i"], {"type": "ldim", "p1": (lp.x(), lp.y()), "p2": (b.x(), b.y()),
+                                   "u": c["u"], "d": c["d"]})
+        elif not self.mpts:
+            old = self._snapmark
+            self._measure_pt(ev)
+            self.ghost = None
+            if old == self._snapmark:
+                return
+        else:
+            i, pts = self.mpts
+            if t in ("ldim", "chain") and len(pts) == 2:
+                _, c = self.to_page(ev.position(), page=i)
+                self._snapmark = None
+                g = self._ldim_from(pts[0], pts[1], c, bool(ev.modifiers() & Qt.ShiftModifier))
+                self.ghost = (i, g) if g else None
+            else:
+                _, b = self._measure_pt(ev, page=i, base=pts[-1])
+                q = [(p.x(), p.y()) for p in pts] + [(b.x(), b.y())]
+                if t in ("ldim", "chain"):
+                    self.ghost = (i, {"type": "dim", "p1": q[0], "p2": q[1]})
+                else:
+                    g = {"type": t, "pts": q}
+                    self.ghost = (i, g)
+                    S = self.scale_of(i)
+                    if t == "pdim":
+                        self.status.emit(f"מדידה רציפה: {len(q) - 1} קטעים, {M.label_of(g, S)}  ·  "
+                                         "לחיצה כפולה, Enter או לחצן ימני מסיימים · Backspace מבטל נקודה")
+                    elif len(q) >= 3:
+                        self.status.emit(M.label_of(g, S) + "  ·  לחיצה כפולה, Enter, לחצן ימני "
+                                         "או הקלקה על הנקודה הראשונה סוגרים")
+        self.viewport().update()
+
+    def _finish_multi(self):
+        t = self.tool
+        if t == "chain" and self.chain:
+            self.chain = None
+            self.mpts = None
+            self.ghost = None
+            self.status.emit("שרשרת המידות הסתיימה")
+            self.viewport().update()
+            return
+        if not self.mpts:
+            return
+        i, pts = self.mpts
+        self.mpts = None
+        self.ghost = None
+        need = {"pdim": 2, "area": 3}.get(t)
+        if need and len(pts) >= need:
+            self._push_undo()
+            it = {"type": t, "pts": [(q.x(), q.y()) for q in pts], "color": self.pen_color}
+            self.items.setdefault(i, []).append(it)
+            self.status.emit(M.label_of(it, self.scale_of(i)))
+        self.viewport().update()
+
+    # ----- עריכת הקנ"מ ישירות מהכיתוב שבפינת השרטוט (גרסת המשרד)
+    def _edit_badge(self):
+        if self._badge_edit is not None or self._badge_rect is None:
+            return
+        i = max(0, self._cur_page)
+        r = self._badge_rect
+        e = _BadgeEdit(self.viewport())
+        e.setAlignment(Qt.AlignCenter)
+        e.setText(f"1:{self.shown_scale(i):.4g}")
+        e.setToolTip("מקלידים קנה מידה, למשל 1:50 או 50, ולוחצים Enter. Esc מבטל")
+        w = int(max(r.width(), 120))
+        e.setGeometry(int(r.right() - w), int(r.y()), w, int(r.height()) + 2)
+        e.setStyleSheet("QLineEdit{background:#fff;border:2px solid #c8202f;border-radius:4px;font-size:10pt}")
+        self._badge_edit = e
+
+        def done(ok):
+            if self._badge_edit is not e:
+                return
+            self._badge_edit = None
+            t = e.text().strip()
+            e.hide()
+            e.deleteLater()
+            if ok and t:
+                try:
+                    S = float(t.replace(" ", "").replace("/", ":").split(":")[-1])
+                except ValueError:
+                    S = 0.0
+                if 0 < S <= 100000:
+                    self.set_scale(i, S)
+                    self.scale_changed.emit(S)
+                    self.status.emit(f"הקנ\"מ של עמוד {i + 1} עודכן ל-1:{S:.4g}. כל המדידות בעמוד חושבו מחדש")
+                else:
+                    self.status.emit("קנה המידה שהוקלד לא תקין — לא שונה")
+            self.setFocus()
+            self.viewport().update()
+
+        e.returnPressed.connect(lambda: done(True))
+        e.editingFinished.connect(lambda: done(False))
+        e.show()
+        e.setFocus()
+        e.selectAll()
 
     def _erase_at(self, pos):
         i, pt = self.to_page(pos)
@@ -1827,7 +2102,14 @@ class PdfView(QAbstractScrollArea):
             return
         if not self.sizes:
             return
+        if ev.button() == Qt.LeftButton and self._badge_rect is not None and not brand.COMMERCIAL \
+                and self._badge_rect.contains(ev.position()):
+            self._edit_badge()
+            return
         if ev.button() == Qt.RightButton and self.tool != "pan":
+            if self.tool in ("pdim", "area", "chain") and (self.mpts or self.chain):
+                self._finish_multi()
+                return
             self.set_tool("pan")
             return
         if ev.button() == Qt.LeftButton and self.tool == "pen":
@@ -1960,13 +2242,15 @@ class PdfView(QAbstractScrollArea):
             self.items.setdefault(i, []).append(it)
             self.viewport().update()
             return
+        if ev.button() == Qt.LeftButton and self.tool in NEW_MEASURE:
+            self._multi_click(ev)
+            return
         if ev.button() == Qt.LeftButton and self.tool in ("dim", "calib"):
             if self.dim_start is None:
-                self.dim_start = self.to_page(ev.position())
+                self.dim_start = self._measure_pt(ev)
                 return
             i, a = self.dim_start
-            _, b = self.to_page(ev.position(), page=i)
-            b = self._ortho(a, b, ev)
+            _, b = self._measure_pt(ev, page=i, base=a)
             self.dim_start = None
             self.ghost = None
             if math.hypot(b.x() - a.x(), b.y() - a.y()) < 0.5:
@@ -2006,6 +2290,18 @@ class PdfView(QAbstractScrollArea):
     def mouseMoveEvent(self, ev):
         if self._pinch is not None:          # בזמן צביטה במסך מגע — לא גוררים ולא מציירים
             return
+        if self._badge_rect is not None and not brand.COMMERCIAL and not ev.buttons():
+            over = self._badge_rect.contains(ev.position())
+            if over != self._over_badge:
+                self._over_badge = over
+                if over:
+                    self.viewport().setCursor(Qt.PointingHandCursor)
+                    self.status.emit("לחיצה על הקנ\"מ – הקלדת קנה מידה חדש לעמוד")
+                else:
+                    self.viewport().setCursor({"pan": Qt.OpenHandCursor, "text": Qt.IBeamCursor,
+                                               "erase": Qt.BlankCursor}.get(self.tool, Qt.CrossCursor))
+            if over:
+                return
         if self.tool == "erase_rect" and self._erase_drag and self.erase_rect:
             (kind, hh), p0, r0 = self._erase_drag
             i, _ = self.erase_rect
@@ -2131,12 +2427,18 @@ class PdfView(QAbstractScrollArea):
             it.update({"type": "trafo", "c": (pt.x(), pt.y())})
             self.ghost = (i, it)
             self.viewport().update()
+        elif self.tool in NEW_MEASURE:
+            self._multi_move(ev)
         elif self.tool in ("dim", "calib") and self.dim_start:
             i, a = self.dim_start
-            _, b = self.to_page(ev.position(), page=i)
-            b = self._ortho(a, b, ev)
+            _, b = self._measure_pt(ev, page=i, base=a)
             self.ghost = (i, {"type": "dim", "p1": (a.x(), a.y()), "p2": (b.x(), b.y())})
             self.viewport().update()
+        elif self.tool in ("dim", "calib"):
+            old = self._snapmark
+            self._measure_pt(ev)
+            if old != self._snapmark:
+                self.viewport().update()
         elif self.tool in ("pan", "text"):
             h = self._handle_at(ev.position())
             if h:
@@ -2246,6 +2548,9 @@ class PdfView(QAbstractScrollArea):
             self.status.emit(f"מעבר לעמוד {lk['page'] + 1}")
 
     def mouseDoubleClickEvent(self, ev):
+        if self.tool in ("pdim", "area", "chain") and (self.mpts or self.chain):
+            self._finish_multi()
+            return
         if not self.sizes or ev.button() != Qt.LeftButton:
             return
         if self.tool == "erase_rect" and self.erase_rect and self._erase_rect_hit(ev.position()):
@@ -2288,10 +2593,22 @@ class PdfView(QAbstractScrollArea):
             self.viewport().update()
         elif k == Qt.Key_Escape and self.tool == "pan" and not self.select_mode and self.window().isFullScreen():
             self.window()._toggle_full()
+        elif k == Qt.Key_F3 and not brand.COMMERCIAL:
+            self.toggle_snap()
+        elif self.tool in NEW_MEASURE and k in (Qt.Key_Return, Qt.Key_Enter):
+            self._finish_multi()
+        elif self.tool in NEW_MEASURE and k == Qt.Key_Backspace and self.mpts:
+            self.mpts[1].pop()
+            if not self.mpts[1]:
+                self.mpts = None
+            self.ghost = None
+            self.viewport().update()
         elif k == Qt.Key_Escape and self.tool != "pan":
-            if self.dim_start or self.shape_start:
+            if self.dim_start or self.shape_start or self.mpts or self.chain:
                 self.dim_start = None
                 self.shape_start = None
+                self.mpts = None
+                self.chain = None
                 self.ghost = None
                 self.viewport().update()
             else:
@@ -2583,7 +2900,7 @@ class MainWindow(QMainWindow):
         if v is self.split_v:
             self._split_off()
         try:
-            v.analyzer.shutdown()
+            v.analyzer.shutdown(); v.snaploader.shutdown()
         except Exception:
             pass
         if len(self._views) == 1:
@@ -2635,7 +2952,7 @@ class MainWindow(QMainWindow):
             self.tabbar.blockSignals(False)
             self.stack.removeWidget(e)
             try:
-                e.analyzer.shutdown()
+                e.analyzer.shutdown(); e.snaploader.shutdown()
             except Exception:
                 pass
             e.setParent(None)
@@ -3025,6 +3342,21 @@ class MainWindow(QMainWindow):
                   "מקליקים נקודת התחלה ונקודת סיום. Shift = קו ישר. התוצאה בס\"מ לפי הקנ\"מ")
         self._act(mm2, "כיול לפי קו באורך ידוע", lambda: self._tool_clicked("calib", True),
                   "מסמנים קו שאורכו ידוע ומקלידים את אורכו האמיתי — הקנ\"מ יחושב")
+        if not brand.COMMERCIAL:
+            self._act(mm2, "מדידה רציפה (תוואי כבל)", lambda: self._tool_clicked("pdim", True),
+                      "מקליקים נקודה אחרי נקודה לאורך התוואי — מקבלים את האורך הכולל במטרים")
+            self._act(mm2, "שטח והיקף", lambda: self._tool_clicked("area", True),
+                      "מקליקים על פינות האזור — מקבלים שטח במ\"ר והיקף במטרים")
+            self._act(mm2, "קו מידה קבוע", lambda: self._tool_clicked("ldim", True),
+                      "שתי נקודות ומקום לקו המידה. נשמר בקובץ ומודפס. Shift בהצבה = אופקי / אנכי")
+            self._act(mm2, "שרשרת מידות", lambda: self._tool_clicked("chain", True),
+                      "מידות רצופות על קו אחד — כל הקלקה מוסיפה מידה מהנקודה הקודמת")
+            self.snap_act = mm2.addAction("הצמדה לקווי השרטוט  (F3)")
+            self.snap_act.setCheckable(True)
+            self.snap_act.setChecked(bool(getattr(PdfView, "snap_on", True)))
+            self.snap_act.setToolTip("נקודת המדידה נצמדת לקצה, אמצע, מפגש או ניצב של קווי השרטוט")
+            self.snap_act.toggled.connect(lambda on: self.view.toggle_snap(on))
+            mm2.addSeparator()
         self._act(mm2, "בדיקת קנ\"מ מחדש מול המידות", self._reanalyze,
                   "מבטל קנ\"מ שנקבע ידנית בעמוד ובודק שוב לפי הכיתוב והמידות בשרטוט")
         mb = RibbonButton("מדידה", "לחיצה: מתחילים למדוד (שתי הקלקות על השרטוט, התוצאה בס\"מ).\n"
@@ -3368,8 +3700,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("מקליקים על השרטוט במקום החותמת — אם המקום תפוס, היא תונח במקום הפנוי הקרוב. Esc מבטל")
         v.setFocus()
 
+    def _sync_snap(self):
+        a = getattr(self, "snap_act", None)
+        if a is not None:
+            a.blockSignals(True)
+            a.setChecked(bool(PdfView.snap_on))
+            a.blockSignals(False)
+
     def _measure_toggle(self):
-        if self.view.tool in ("dim", "calib"):
+        if self.view.tool in MEASURE_TOOLS:
             self.view.set_tool("pan")
         else:
             self._tool_clicked("dim", True)
@@ -3440,7 +3779,7 @@ class MainWindow(QMainWindow):
         for b, on in ((getattr(self, "copy_btn", None), v.select_mode and v.select_purpose == "copy"),
                       (getattr(self, "print_btn", None), v.select_mode and v.select_purpose == "print"),
                       (getattr(self, "add_btn", None), v.tool in self.ADD_TOOLS),
-                      (getattr(self, "measure_btn", None), v.tool in ("dim", "calib")),
+                      (getattr(self, "measure_btn", None), v.tool in MEASURE_TOOLS),
                       (getattr(self, "stamp_btn", None), v.tool == "stamp"),
                       (getattr(self, "erase_btn", None), v.tool in ("erase_item", "erase_rect"))):
             if b is None:
@@ -3536,7 +3875,17 @@ class MainWindow(QMainWindow):
         self._show_scale()
         if key == "dim":
             v.set_tool("dim")
-            self.statusBar().showMessage("מקליקים נקודת התחלה ונקודת סיום. Shift = קו ישר. Esc מסיים")
+            self.statusBar().showMessage("מקליקים נקודת התחלה ונקודת סיום. Shift = קו ישר. Esc מסיים" +
+                                         ("" if brand.COMMERCIAL else ". F3 = הצמדה לקווים"))
+        elif key in NEW_MEASURE and not brand.COMMERCIAL:
+            v.set_tool(key)
+            self.statusBar().showMessage({
+                "pdim": "מדידה רציפה: מקליקים נקודה אחרי נקודה. לחיצה כפולה, Enter או לחצן ימני מסיימים. "
+                        "Backspace מבטל נקודה. F3 = הצמדה",
+                "area": "שטח והיקף: מקליקים על פינות האזור. הקלקה על הנקודה הראשונה, לחיצה כפולה או Enter סוגרים",
+                "ldim": "קו מידה: מקליקים שתי נקודות, ואז את מקום קו המידה. Shift בהצבה = אופקי או אנכי",
+                "chain": "שרשרת מידות: שתי נקודות ומקום לקו המידה, ואז כל הקלקה מוסיפה מידה. Enter מסיים",
+            }[key])
         elif key == "pen":
             v.set_tool("pen")
             self.statusBar().showMessage("ציור חופשי: לוחצים וגוררים. Esc או לחצן ימני מסיימים")
@@ -3662,7 +4011,7 @@ class MainWindow(QMainWindow):
 
     def _on_tool(self, tool):
         add = tool in ("hole", "pen", "erase", "text", "trafo", "shape", "mark", "stamp")
-        for b, on in ((self.add_btn, add), (self.measure_btn, tool in ("dim", "calib"))):
+        for b, on in ((self.add_btn, add), (self.measure_btn, tool in MEASURE_TOOLS)):
             b.blockSignals(True)
             b.setChecked(on)
             b.blockSignals(False)
@@ -4174,7 +4523,7 @@ class MainWindow(QMainWindow):
         if self.secondary:
             for v in self._views:
                 try:
-                    v.analyzer.shutdown()
+                    v.analyzer.shutdown(); v.snaploader.shutdown()
                 except Exception:
                     pass
         else:
@@ -4321,7 +4670,7 @@ def main():
     for w in [win] + [x for x in QApplication.topLevelWidgets() if isinstance(x, MainWindow) and x is not win]:
         for v in w._views:
             try:
-                v.analyzer.shutdown()
+                v.analyzer.shutdown(); v.snaploader.shutdown()
             except Exception:
                 pass
     return rc
