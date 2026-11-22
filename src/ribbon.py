@@ -161,7 +161,8 @@ QToolButton#rb, QToolButton#rbmain { color: #1f2328; background: transparent; bo
     border-radius: 8px; padding: 4px 3px 4px 3px; min-height: 58px; max-height: 58px; min-width: 38px; font-size: 9.5pt; }
 QToolButton#rb:hover { background: #f4f5f7; border-color: #d5d9de; }
 QToolButton#rb::menu-indicator, QToolButton#rbmain::menu-indicator { image: none; width: 0; }
-QToolButton#rb::menu-button { border: none; border-right: 1px solid #d5d9de; width: 14px; }
+QToolButton#rb::menu-button { border: none; width: 14px; }
+QToolButton#rb::menu-button:hover { border: none; background: #e9ecf0; border-radius: 3px; }
 QToolButton#rbmain { background: #c8202f; border-color: #c8202f; color: #ffffff; font-weight: 600; }
 QToolButton#rbmain:hover { background: #a31724; border-color: #a31724; }
 QToolButton#fz { color: #1f2328; background: #ffffff; border: 1px solid #d5d9de; border-radius: 0; margin-left: -1px;

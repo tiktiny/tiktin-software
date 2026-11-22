@@ -361,17 +361,8 @@ def find_snap(cache, x, y, tol, base=None):
     return best[1], best[2], best[3]
 
 
-def paint_snap_marker(p, c, kind, color="#e8590c"):
-    """סימן ההצמדה ליד העכבר (במערכת המסך)."""
-    from PySide6.QtGui import QPen
-    pen = QPen(QColor(color))
-    pen.setWidthF(2.0)
-    pen.setCosmetic(True)
-    p.save()
-    p.setPen(pen)
-    p.setBrush(Qt.NoBrush)
-    s = 6.0
-    x, y = c.x(), c.y()
+def _snap_shape(p, x, y, s, kind):
+    """צורת סימן ההצמדה, כמו באוטוקד: ריבוע = קצה, משולש = אמצע, X = חיתוך, זווית = ניצב, שעון חול = על הקו."""
     if kind == "end":
         p.drawRect(QRectF(x - s, y - s, 2 * s, 2 * s))
     elif kind == "mid":
@@ -392,12 +383,28 @@ def paint_snap_marker(p, c, kind, color="#e8590c"):
         path.lineTo(x + s, y + s)
         path.closeSubpath()
         p.drawPath(path)
+
+
+def paint_snap_marker(p, c, kind, color="#e8590c"):
+    """סימן ההצמדה ליד העכבר (במערכת המסך)."""
+    from PySide6.QtGui import QPen
+    p.save()
+    p.setBrush(Qt.NoBrush)
+    s = 8.0
+    x, y = c.x(), c.y()
+    for col, w in ((QColor(255, 255, 255, 230), 5.0), (QColor(color), 2.4)):   # הילה לבנה ואז הסימן
+        pen = QPen(col)
+        pen.setWidthF(w)
+        pen.setCosmetic(True)
+        p.setPen(pen)
+        _snap_shape(p, x, y, s, kind)
+    p.setPen(QColor(color))
     f = p.font()
     f.setPointSizeF(8.5)
     p.setFont(f)
     txt = SNAP_NAMES.get(kind, "")
     fm = p.fontMetrics()
-    r = QRectF(x + 10, y + 8, fm.horizontalAdvance(txt) + 8, fm.height() + 2)
+    r = QRectF(x + 13, y + 10, fm.horizontalAdvance(txt) + 8, fm.height() + 2)
     p.setPen(Qt.NoPen)
     p.setBrush(QColor(255, 255, 255, 230))
     p.drawRect(r)

@@ -1064,9 +1064,7 @@ class PdfView(QAbstractScrollArea):
             self._snap_segments(max(0, self._cur_page))
         if tool != "pan":
             self.selected = None
-        cur = {"pan": Qt.OpenHandCursor if self.sizes else Qt.ArrowCursor, "text": Qt.IBeamCursor,
-               "erase": Qt.BlankCursor}.get(tool, Qt.CrossCursor)
-        self.viewport().setCursor(cur)
+        self.viewport().setCursor(self._tool_cursor())
         self.tool_changed.emit(tool)
         self.viewport().update()
 
@@ -1573,7 +1571,40 @@ class PdfView(QAbstractScrollArea):
         if f:
             f()
         self.status.emit("הצמדה לקווי השרטוט: " + ("פועלת" if on else "כבויה") + "  (F3 מחליף)")
+        self.viewport().setCursor(self._tool_cursor())
         self.viewport().update()
+
+    _snap_cursor = None
+
+    def _tool_cursor(self):
+        """סמן העכבר של הכלי. כשההצמדה פועלת: צלב עם ריבוע חיפוש (כמו באוטוקד) – בלי ציור נוסף על המסך."""
+        t = self.tool
+        if t == "pan":
+            return Qt.OpenHandCursor if self.sizes else Qt.ArrowCursor
+        if t == "text":
+            return Qt.IBeamCursor
+        if t == "erase":
+            return Qt.BlankCursor
+        if self._snap_active():
+            if PdfView._snap_cursor is None:
+                from PySide6.QtGui import QPixmap, QPen, QCursor
+                n, c, a = 41, 20, 10          # גודל, מרכז, חצי צלע הריבוע = מרחק החיפוש (10 נק' מסך)
+                pm = QPixmap(n, n)
+                pm.fill(Qt.transparent)
+                q = QPainter(pm)
+                for col, w in ((QColor(255, 255, 255, 220), 3.0), (QColor("#1f2328"), 1.0)):
+                    pen = QPen(col)
+                    pen.setWidthF(w)
+                    q.setPen(pen)
+                    q.drawLine(0, c, c - a - 2, c)
+                    q.drawLine(c + a + 2, c, n - 1, c)
+                    q.drawLine(c, 0, c, c - a - 2)
+                    q.drawLine(c, c + a + 2, c, n - 1)
+                    q.drawRect(c - a, c - a, 2 * a, 2 * a)
+                q.end()
+                PdfView._snap_cursor = QCursor(pm, c, c)
+            return PdfView._snap_cursor
+        return Qt.CrossCursor
 
     def _snap_reset(self):
         self._snap_cache = {}
@@ -2298,8 +2329,7 @@ class PdfView(QAbstractScrollArea):
                     self.viewport().setCursor(Qt.PointingHandCursor)
                     self.status.emit("לחיצה על הקנ\"מ – הקלדת קנה מידה חדש לעמוד")
                 else:
-                    self.viewport().setCursor({"pan": Qt.OpenHandCursor, "text": Qt.IBeamCursor,
-                                               "erase": Qt.BlankCursor}.get(self.tool, Qt.CrossCursor))
+                    self.viewport().setCursor(self._tool_cursor())
             if over:
                 return
         if self.tool == "erase_rect" and self._erase_drag and self.erase_rect:
