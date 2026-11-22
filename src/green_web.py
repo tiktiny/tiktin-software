@@ -14,7 +14,8 @@ PORT = 51287          # פורט קבוע: כך החותמת שנשמרה בדפ
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
          ".mjs": "text/javascript; charset=utf-8", ".pdf": "application/pdf"}
 
-_state = {"server": None, "pdf": b"", "name": "", "port": None, "src": "", "on_result": None}
+_state = {"server": None, "pdf": b"", "name": "", "port": None, "src": "", "on_result": None,
+          "params": {}, "on_fail": None}
 
 
 def cache_dir():
@@ -73,20 +74,31 @@ def _loader():
     name = json.dumps(_state["name"], ensure_ascii=False)
     stem = json.dumps(os.path.splitext(_state["name"])[0], ensure_ascii=False)
     return ("<script type=\"module\">\n"
-            "/* טיקטין PDF: הטופס הפתוח נטען אוטומטית */\n"
+            "/* טיקטין PDF: הטופס הפתוח ופרטי הפרויקט נטענים אוטומטית */\n"
+            "const wait = () => new Promise(r => { const t = () => window.__green ? r() : setTimeout(t, 50); t(); });\n"
+            "await wait();\n"
+            "const P = await (await fetch('/__params?' + Date.now())).json();\n"
+            "if (P.stamp) window.__green.setStamp(P.stamp, false);\n"
             "const r = await fetch('/__form.pdf?' + Date.now()); const b = new Uint8Array(await r.arrayBuffer());\n"
-            "const go = () => window.__green ? window.__green.loadBytes(b, " + name + ") : setTimeout(go, 80); go();\n"
+            "await window.__green.loadBytes(b, " + name + ");\n"
+            "const set = (id, v) => { const e = document.getElementById(id); if (e && v != null && v !== '') e.value = v; };\n"
+            "set('project', P.project); set('tender', P.tender); set('ts', P.ts);\n"
+            "const send = async o => { const r = await fetch('/__result', { method: 'POST', body: o }); const j = await r.json(); if (!j.ok) throw new Error(j.err || ''); return j; };\n"
+            "if (P.auto) {\n"
+            " try { await window.__green.fill(); } catch (e) {}\n"
+            " const o = window.__green.out();\n"
+            " if (o) { try { await send(o); } catch (e) { await fetch('/__fail', { method: 'POST', body: 'לא הצלחתי להחזיר את הטופס הממולא' }); } }\n"
+            " else { const st = document.getElementById('status'); await fetch('/__fail', { method: 'POST', body: (st && st.innerText.trim()) || 'הטופס לא מולא' }); }\n"
+            "}\n"
             "/* ייצוא PDF: הטופס הממולא והחתום חוזר לטיקטין PDF (נשמר ליד המקורי ונפתח בלשונית חדשה) */\n"
             "const dl = document.getElementById('dl');\n"
-            "if (dl) { const sp = dl.querySelector('span'); if (sp) sp.textContent = 'שמירה ופתיחה בטיקטין PDF';\n"
+            "if (dl && !P.auto) { const sp = dl.querySelector('span'); if (sp) sp.textContent = 'שמירה ופתיחה בטיקטין PDF';\n"
             " dl.title = 'הטופס הממולא נשמר ליד הקובץ המקורי ונפתח בטיקטין PDF בלשונית חדשה';\n"
             " const note = (t, bad) => { let n = document.getElementById('__tkn'); if (!n) { n = document.createElement('div'); n.id = '__tkn';\n"
             "   n.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:9999;padding:10px 16px;border-radius:8px;color:#fff;font:15px Rubik,Arial;max-width:70vw'; document.body.appendChild(n); }\n"
             "   n.style.background = bad ? '#c8202f' : '#17364c'; n.textContent = t; n.style.display = 'block'; clearTimeout(n._t); n._t = setTimeout(() => n.style.display = 'none', 6000); };\n"
             " dl.onclick = async () => { const o = window.__green.out(); if (!o) return;\n"
-            "  try { const r = await fetch('/__result', { method: 'POST', body: o });\n"
-            "   const j = await r.json(); if (!j.ok) throw new Error(j.err || '');\n"
-            "   note('נשמר ונפתח בטיקטין PDF: ' + j.name);\n"
+            "  try { const j = await send(o); note('נשמר ונפתח בטיקטין PDF: ' + j.name);\n"
             "  } catch (e) { note('לא הצלחתי להחזיר לטיקטין PDF (התוכנה סגורה?) – הקובץ יורד כרגיל', true);\n"
             "   const u = URL.createObjectURL(new Blob([o], { type: 'application/pdf' })); const a = document.createElement('a'); a.href = u;\n"
             "   a.download = " + stem + " + ' - ממולא וחתום.pdf'; document.body.appendChild(a); a.click(); a.remove(); } }; }\n"
@@ -109,6 +121,10 @@ class _H(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?")[0].lstrip("/") or "index.html"
         if path == "__form.pdf":
             return self._send(_state["pdf"], TYPES[".pdf"])
+        if path == "__params":
+            import json
+            return self._send(json.dumps(_state["params"], ensure_ascii=False).encode("utf-8"),
+                              "application/json; charset=utf-8")
         if "/" in path or "\\" in path or path.startswith(".") or path not in SMALL + BIG:
             self.send_error(404)
             return
@@ -124,6 +140,13 @@ class _H(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         import json
+        if self.path.split("?")[0] == "/__fail":
+            n = int(self.headers.get("Content-Length") or 0)
+            msg = self.rfile.read(n).decode("utf-8", "replace") if 0 < n < 100000 else ""
+            cb = _state["on_fail"]
+            if cb:
+                cb(msg.strip() or "הטופס לא מולא")
+            return self._send(b'{"ok": true}', "application/json; charset=utf-8")
         if self.path.split("?")[0] != "/__result":
             self.send_error(404)
             return
@@ -169,11 +192,12 @@ class _Srv(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
-def serve(pdf_bytes, name, src_path="", on_result=None, is_open=None):
+def serve(pdf_bytes, name, src_path="", on_result=None, is_open=None, params=None, on_fail=None):
     """מגיש את האפליקציה ואת הטופס במחשב המקומי בלבד (127.0.0.1). מחזיר את הכתובת לפתיחה בדפדפן.
     on_result(path) נקרא כשהטופס הממולא חוזר (מתהליך הרשת — לקרוא ממנו רק לאות Qt)."""
     _state["pdf"], _state["name"], _state["src"], _state["on_result"] = pdf_bytes, name, src_path, on_result
     _state["is_open"] = is_open
+    _state["params"], _state["on_fail"] = dict(params or {}), on_fail
     if _state["server"] is None:
         srv = None
         for port in (PORT, PORT + 1, PORT + 2, 0):
@@ -195,3 +219,44 @@ def shutdown():
             _state["server"].shutdown()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------- מילוי אוטומטי בדפדפן נסתר
+def find_browser():
+    """Edge (קיים בכל Windows 10/11) או Chrome. None אם לא נמצא."""
+    cands = []
+    for env in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
+        root = os.environ.get(env)
+        if root:
+            cands += [os.path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"),
+                      os.path.join(root, "Google", "Chrome", "Application", "chrome.exe")]
+    for c in cands:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def run_hidden(url):
+    """מריץ את האפליקציה בדפדפן בלי חלון. מחזיר את התהליך (לסגירה בסיום), או None."""
+    import subprocess
+    exe = find_browser()
+    if not exe:
+        return None
+    prof = os.path.join(cache_dir(), "browser-profile")
+    try:
+        return subprocess.Popen([exe, "--headless=new", "--disable-gpu", "--no-first-run",
+                                 "--no-default-browser-check", "--disable-extensions",
+                                 "--user-data-dir=" + prof, url],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                creationflags=0x08000000 if os.name == "nt" else 0)
+    except Exception:
+        return None
+
+
+def stop(proc):
+    if proc is None:
+        return
+    try:
+        proc.kill()
+    except Exception:
+        pass

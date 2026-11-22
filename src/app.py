@@ -2684,6 +2684,8 @@ class DocTabBar(QTabBar):
 # ---------------------------------------------------------------- main window
 class MainWindow(QMainWindow):
     files_arrived = Signal(list)      # קבצים שנשלחו מהפעלה נוספת של התוכנה
+    green_failed = Signal(str)        # המילוי האוטומטי של התקן הירוק לא הצליח (הודעה בעברית)
+    green_done = Signal(str)          # הטופס הממולא מוכן (נתיב)
 
     def __init__(self, pool, secondary=False):
         super().__init__()
@@ -2736,6 +2738,8 @@ class MainWindow(QMainWindow):
         self.tabbar.customContextMenuRequested.connect(self._tab_menu)
         self._build_toolbar()
         self.files_arrived.connect(self.open_files)
+        self.green_failed.connect(self._green_failed)
+        self.green_done.connect(self._green_done)
         self.view.wheel_zoom = False
         g = None if secondary else self.settings.value("geometry")
         if g is not None:
@@ -3167,7 +3171,8 @@ class MainWindow(QMainWindow):
             err = green_web.update_files()
             url = None if err else green_web.serve(data, os.path.basename(v.path), v.path,
                                                      lambda p_: self.files_arrived.emit([p_]),
-                                                     lambda p_: self._find_tab(p_) >= 0)
+                                                     lambda p_: self._find_tab(p_) >= 0,
+                                                     params=self._green_defaults(), on_fail=None)
         except Exception:
             err, url = "לא ניתן להפעיל את אפליקציית התקן הירוק.", None
         finally:
@@ -3176,7 +3181,186 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "תקן ירוק", err)
             return
         QDesktopServices.openUrl(QUrl(url))
-        self.statusBar().showMessage("אפליקציית התקן הירוק נפתחה בדפדפן עם הטופס", 6000)
+        self.statusBar().showMessage("אפליקציית התקן הירוק נפתחה בדפדפן עם הטופס והפרטים — נשאר ללחוץ \"מילוי הטופס\"", 8000)
+
+    # ----- תקן ירוק: מילוי אוטומטי בלי דפדפן גלוי
+    def _green_defaults(self):
+        """פרטי הפרויקט שנשלחים לאפליקציה: מהמילוי האחרון של אותו קובץ, או משם הקובץ."""
+        v = self.view
+        last = getattr(self, "_green_last", None) or {}
+        if last.get("path") != v.path:
+            last = {}
+        st = QSettings(*brand.ORG)
+        return {"project": last.get("project") or os.path.splitext(os.path.basename(v.path or ""))[0],
+                "tender": last.get("tender", ""), "ts": last.get("ts", "in"),
+                "stamp": st.value("green_stamp", "") or ""}
+
+    def _green_load_stamp(self, force=False):
+        """תמונת החותמת והחתימה. נשמרת בהגדרות של המחשב הזה בלבד (לא בתוכנה ולא בגיטהאב)."""
+        st = QSettings(*brand.ORG)
+        cur = st.value("green_stamp", "") or ""
+        if cur and not force:
+            return cur
+        f, _ = QFileDialog.getOpenFileName(self, "בחירת תמונת החותמת והחתימה", "", "תמונה (*.png *.jpg *.jpeg)")
+        if not f:
+            return cur
+        try:
+            with open(f, "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            QMessageBox.warning(self, "תקן ירוק", "לא ניתן לקרוא את קובץ התמונה.")
+            return cur
+        mime = "image/png" if raw[:4] == b"\x89PNG" else "image/jpeg"
+        url = "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode())
+        st.setValue("green_stamp", url)
+        self.statusBar().showMessage("החותמת נשמרה במחשב הזה", 5000)
+        return url
+
+    def _green_ask(self):
+        """חלון קצר: שם הפרויקט, מכרז מדינה, תחנת שנאים. מחזיר פרטים או None."""
+        from PySide6.QtWidgets import QFormLayout, QDialogButtonBox
+        prm = self._green_defaults()
+        d = QDialog(self)
+        d.setWindowTitle("תקן ירוק – מילוי אוטומטי")
+        d.setLayoutDirection(Qt.RightToLeft)
+        lay = QVBoxLayout(d)
+        info = QLabel("הטופס הפתוח ימולא וייחתם לפי הכללים של אפליקציית התקן הירוק, "
+                      "והטופס הממולא ייפתח בלשונית חדשה.")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        form = QFormLayout()
+        proj = QLineEdit(prm["project"])
+        tender = QComboBox()
+        tender.addItems(["בחר…", "לא", "כן"])
+        tender.setCurrentIndex({"no": 1, "yes": 2}.get(prm["tender"], 0))
+        ts = QComboBox()
+        ts.addItems(["בתוך תחום המגרש", "מחוץ לתחום המגרש"])
+        ts.setCurrentIndex(1 if prm["ts"] == "out" else 0)
+        form.addRow("שם הפרויקט:", proj)
+        form.addRow("מכרז מדינה / דיור להשכרה:", tender)
+        form.addRow("תחנת שנאים של חברת החשמל:", ts)
+        stamp_lbl = QLabel()
+        stamp_btn = QPushButton("טעינת חותמת…")
+
+        def paint_stamp():
+            have = bool(QSettings(*brand.ORG).value("green_stamp", ""))
+            stamp_lbl.setText("✓ חותמת שמורה במחשב הזה" if have else "לא נטענה חותמת")
+            stamp_lbl.setStyleSheet("color:#1a7f37" if have else "color:#c8202f")
+            stamp_btn.setText("החלפה…" if have else "טעינת חותמת…")
+        stamp_btn.clicked.connect(lambda: (self._green_load_stamp(force=True), paint_stamp()))
+        row = QHBoxLayout()
+        row.addWidget(stamp_lbl)
+        row.addStretch(1)
+        row.addWidget(stamp_btn)
+        form.addRow("חותמת וחתימה:", row)
+        paint_stamp()
+        lay.addLayout(form)
+        bb = QDialogButtonBox()
+        ok = bb.addButton("מילוי הטופס", QDialogButtonBox.AcceptRole)
+        bb.addButton("ביטול", QDialogButtonBox.RejectRole)
+        ok.setDefault(True)
+        lay.addWidget(bb)
+
+        def accept():
+            if tender.currentIndex() == 0:
+                QMessageBox.information(d, "תקן ירוק", "בחר אם הפרויקט הוא מכרז מדינה / דיור להשכרה.")
+                tender.setFocus()
+                return
+            if not QSettings(*brand.ORG).value("green_stamp", ""):
+                QMessageBox.information(d, "תקן ירוק", "צריך לטעון פעם אחת את תמונת החותמת והחתימה.")
+                return
+            d.accept()
+        bb.accepted.connect(accept)
+        bb.rejected.connect(d.reject)
+        d.resize(460, d.sizeHint().height())
+        if d.exec() != QDialog.Accepted:
+            return None
+        prm.update({"project": proj.text().strip(), "tender": "yes" if tender.currentIndex() == 2 else "no",
+                    "ts": "out" if ts.currentIndex() == 1 else "in",
+                    "stamp": QSettings(*brand.ORG).value("green_stamp", "")})
+        self._green_last = {"path": self.view.path, "project": prm["project"], "tender": prm["tender"],
+                            "ts": prm["ts"]}
+        return prm
+
+    def _green_auto(self):
+        """לחיצה על "תקן ירוק": ממלא את הטופס הפתוח ברקע ופותח את הטופס הממולא בלשונית חדשה."""
+        v = self.view
+        if not v.sizes or not v.path:
+            QMessageBox.information(self, "תקן ירוק", "קודם פותחים את טופס ההצהרה שהיועץ שלח.")
+            return
+        if getattr(self, "_green_busy", False):
+            self.statusBar().showMessage("הטופס הקודם עדיין ממולא — עוד רגע", 5000)
+            return
+        prm = self._green_ask()
+        if not prm:
+            return
+        try:
+            with open(v.path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            QMessageBox.warning(self, "תקן ירוק", "לא ניתן לקרוא את הקובץ הפתוח.")
+            return
+        if v.dirty:
+            self.statusBar().showMessage("שים לב: ממולא הקובץ כפי שהוא שמור בדיסק, בלי השינויים שעוד לא נשמרו", 8000)
+        import threading
+        import time
+        import green_web
+        name, src = os.path.basename(v.path), v.path
+        job = {"done": False, "proc": None}
+        self._green_busy = True
+        self.statusBar().showMessage("ממלא את טופס התקן הירוק ברקע… הטופס הממולא ייפתח בלשונית חדשה")
+
+        def ok_(path):
+            if job["done"]:
+                return
+            job["done"] = True
+            self._green_busy = False
+            green_web.stop(job["proc"])
+            self.green_done.emit(path)
+
+        def fail_(msg):
+            if job["done"]:
+                return
+            job["done"] = True
+            self._green_busy = False
+            green_web.stop(job["proc"])
+            self.green_failed.emit(msg)
+
+        def work():
+            try:
+                err = green_web.update_files()
+                if err:
+                    return fail_(err)
+                url = green_web.serve(data, name, src, ok_, lambda p_: self._find_tab(p_) >= 0,
+                                      params=dict(prm, auto=True), on_fail=fail_)
+                job["proc"] = green_web.run_hidden(url)
+                if job["proc"] is None:
+                    return fail_("לא נמצא במחשב דפדפן Edge או Chrome למילוי האוטומטי.")
+                t0 = time.time()
+                while not job["done"] and time.time() - t0 < 90:
+                    time.sleep(0.1)
+                fail_("המילוי האוטומטי לא הסתיים בזמן.")
+            except Exception:
+                fail_("לא ניתן להפעיל את המילוי האוטומטי.")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _green_done(self, path):
+        self.open_files([path])
+        self.statusBar().showMessage("הטופס מולא ונחתם ונשמר ליד הקובץ המקורי: " + os.path.basename(path) +
+                                     " — בדוק אותו לפני השליחה ליועץ", 15000)
+
+    def _green_failed(self, msg):
+        self.statusBar().clearMessage()
+        box = QMessageBox(self)
+        box.setWindowTitle("תקן ירוק")
+        box.setIcon(QMessageBox.Warning)
+        box.setText("הטופס לא מולא אוטומטית.")
+        box.setInformativeText(msg)
+        web = box.addButton("פתיחה באפליקציה", QMessageBox.AcceptRole)
+        box.addButton("סגירה", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is web:
+            self._green_web()
 
     ICONS = {"פתיחה": "open", "קובץ": "file", "הדפסה": "print", "העתקה": "copy", "הוסף": "add", "חותמות": "stamp",
              "מחיקה מהשרטוט": "erase", "סיבוב": "rotate", "תצוגה": "view", "תקן ירוק": "leaf", "שמירת\nשינויים": "save"}
@@ -3505,9 +3689,20 @@ class MainWindow(QMainWindow):
         self._act(vm, "הוראות הפעלה", self.show_help, shortcut="F1")
         if not brand.COMMERCIAL:           # תקן ירוק — כלי של משרד טיקטין בלבד
             gm = self._menu(self)
-            self._act(gm, "פתיחה באפליקציית התקן הירוק", self._green_web,
-                      "פותח את אפליקציית \"מילוי אוטומטי של תקן ירוק\" בדפדפן, כשהטופס הפתוח כבר טעון בה")
-            self.green_btn = self._menu_btn("תקן ירוק", "מילוי הצהרת חשמל לתקן בנייה ירוקה (ת\"י 5281) על הטופס הפתוח", gm)
+            self._act(gm, "מילוי אוטומטי – הטופס הממולא נפתח בלשונית חדשה", self._green_auto,
+                      "ממלא וחותם את הטופס הפתוח לפי כללי אפליקציית התקן הירוק, בלי לפתוח דפדפן")
+            self._act(gm, "פתיחה באפליקציית התקן הירוק (הטופס והפרטים כבר בפנים)", self._green_web,
+                      "פותח את האפליקציה בדפדפן עם הטופס, פרטי הפרויקט והחותמת — נשאר רק ללחוץ \"מילוי הטופס\"")
+            gm.addSeparator()
+            self._act(gm, "החלפת חותמת וחתימה…", lambda: self._green_load_stamp(force=True),
+                      "תמונת החותמת והחתימה למילוי הטפסים. נשמרת רק במחשב הזה")
+            gb = RibbonButton(self.LABELS.get("תקן ירוק", "תקן ירוק"),
+                              "לחיצה: הטופס הפתוח מתמלא אוטומטית ונפתח בלשונית חדשה.\n"
+                              "החץ הקטן: פתיחה באפליקציה בדפדפן, או החלפת החותמת", self.ICONS.get("תקן ירוק"))
+            gb.setPopupMode(QToolButton.MenuButtonPopup)
+            gb.setMenu(gm)
+            gb.clicked.connect(lambda *_: self._green_auto())
+            self.green_btn = gb
             tb.addWidget(self.green_btn)
             tb.addSeparator()
         tb.addWidget(self._menu_btn("תצוגה", "התאמה לרוחב, 100%, מצב גלגלת ומסך מלא", vm))
