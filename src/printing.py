@@ -11,13 +11,58 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushB
                                QApplication, QSizePolicy)
 from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
 
-RANGES = [("all", "כל הקובץ"), ("page", "עמוד נוכחי"), ("screen", "מסך נוכחי"), ("window", "בחירת חלון")]
+RANGES = [("all", "כל הקובץ"), ("page", "עמוד נוכחי"), ("pages", "עמודים נבחרים"), ("screen", "מסך נוכחי"),
+          ("window", "בחירת חלון")]
+
+
+def parse_pages(t, n):
+    """"1-3, 5, 8-" → [0,1,2,4,7..n-1] (מספור מ-0, בלי כפילויות, לפי הסדר). מחזיר None אם הטקסט לא תקין."""
+    out = []
+    t = (t or "").replace("–", "-").replace("־", "-").replace(";", ",").replace(" ", "")
+    if not t:
+        return None
+    for part in t.split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            try:
+                a = int(a) if a else 1
+                b = int(b) if b else n
+            except ValueError:
+                return None
+            if a > b:
+                a, b = b, a
+            rng = range(a, b + 1)
+        else:
+            try:
+                rng = [int(part)]
+            except ValueError:
+                return None
+        for k in rng:
+            if 1 <= k <= n and k - 1 not in out:
+                out.append(k - 1)
+    return sorted(out) or None
 PAPERS = [("A4", "A4"), ("A3", "A3")]
 COLORS = [("color", "צבע"), ("bw", "שחור-לבן")]
 PAPER_MM = {"A4": (210.0, 297.0), "A3": (297.0, 420.0)}
 MARGIN_MM = 5.0
 FOOTER_MM = 6.0
 MAX_DPI = 300
+FIT = "התאמה לגיליון"
+PRINT_SCALES = [FIT, "1:20", "1:25", "1:50", "1:75", "1:100", "1:125", "1:200", "1:250", "1:500", "1:1000", "1:1250", "1:2500"]
+
+
+def parse_scale(t):
+    """"1:100" / "100" → 100. התאמה לגיליון או טקסט לא תקין → None."""
+    t = (t or "").replace(" ", "").replace("‪", "").replace("‬", "")
+    if ":" in t:
+        t = t.split(":", 1)[1]
+    try:
+        v = float(t.replace(",", "."))
+    except ValueError:
+        return None
+    return v if 0.5 <= v <= 100000 else None
 
 # שחור-לבן: גווני אפור מוכהים, כך שקווים צבעוניים בהירים (צהוב, תכלת) יודפסו כהים וברורים
 _BW_LUT = bytes(255 if v >= 250 else int(255 * (v / 255.0) ** 2.6) for v in range(256))
@@ -32,12 +77,23 @@ def sheet_mm(paper, clip):
     return (h, w) if clip.width > clip.height else (w, h)
 
 
-def draw_sheet(p, area_w, area_h, res, doc, pno, clip, bw, overlay, S, fname, when):
-    """מצייר גיליון אחד בתוך אזור ההדפסה (פיקסלים של ההתקן). מחזיר את קנ"מ ההדפסה."""
+def draw_sheet(p, area_w, area_h, res, doc, pno, clip, bw, overlay, S, fname, when, target=None):
+    """מצייר גיליון אחד בתוך אזור ההדפסה (פיקסלים של ההתקן). מחזיר (קנ"מ ההדפסה, האם נחתך).
+    target = קנ"מ הדפסה קבוע (למשל 100 ל-1:100); None = התאמה לגיליון."""
     px_mm = res / 25.4
     foot = FOOTER_MM * px_mm
     draw_h = area_h - foot
-    fit = min(area_w / clip.width, draw_h / clip.height)      # פיקסל התקן לנקודת PDF
+    cut = False
+    if target:
+        fit = (S / target) * res / 72.0                       # גודל אמיתי לפי קנ"מ השרטוט
+        vw, vh = area_w / fit, draw_h / fit
+        if clip.width > vw + 0.5 or clip.height > vh + 0.5:   # גדול מהגיליון – מדפיסים את המרכז
+            cut = True
+            cx, cy = (clip.x0 + clip.x1) / 2, (clip.y0 + clip.y1) / 2
+            w2, h2 = min(clip.width, vw) / 2, min(clip.height, vh) / 2
+            clip = pymupdf.Rect(cx - w2, cy - h2, cx + w2, cy + h2)
+    else:
+        fit = min(area_w / clip.width, draw_h / clip.height)      # פיקסל התקן לנקודת PDF
     scale = min(fit, MAX_DPI / 72.0)
     page = doc[pno]
     if bw:
@@ -82,7 +138,7 @@ def draw_sheet(p, area_w, area_h, res, doc, pno, clip, bw, overlay, S, fname, wh
                f"קנ\"מ בהדפסה \u202a1:{_fmt_scale(printed)}\u202c   (קנ\"מ השרטוט \u202a1:{_fmt_scale(S)}\u202c)")
     p.drawText(box, Qt.AlignAbsolute | Qt.AlignLeft | Qt.AlignVCenter, f"הודפס \u202a{when}\u202c")
     p.restore()
-    return printed
+    return printed, cut
 
 
 class PrintDialog(QDialog):
@@ -125,11 +181,33 @@ class PrintDialog(QDialog):
             saved_range = "page"
         self.g_range = seg("מה להדפיס", RANGES, saved_range, {
             "all": f"כל {n} העמודים", "page": "העמוד שמוצג כעת",
+            "pages": "מקלידים עמודים: טווח במקף (2-5) ועמודים בודדים בפסיק (1,3,7)",
             "screen": "בדיוק מה שרואים כרגע בחלון",
             "window": "החלון ייסגר לרגע — גוררים מלבן על השרטוט"})
+        from PySide6.QtWidgets import QLineEdit
+        self.pages_edit = QLineEdit(st.value("pr_pages", "") or "")
+        self.pages_edit.setPlaceholderText("למשל 1-3,5")
+        self.pages_edit.setToolTip(f"עמודים להדפסה מתוך {n}: טווח במקף (2-5), עמודים בודדים בפסיק (1,3,7), "
+                                   "או שילוב (1-3,6,9-12)")
+        self.pages_edit.setFixedWidth(130)
+        self.pages_edit.setAlignment(Qt.AlignCenter)
+        self.pages_edit.setLayoutDirection(Qt.LeftToRight)
+        row1.insertWidget(row1.indexOf(self.g_range) + 1, self.pages_edit)
+        self.pages_edit.textChanged.connect(lambda *_: self._changed())
         self.g_paper = seg("גיליון", PAPERS, st.value("pr_paper", "A3"))
         self.g_color = seg("צבע", COLORS, st.value("pr_color", "color"),
                            {"bw": "קווים צבעוניים בהירים יודפסו כהים"})
+        row1.addWidget(QLabel("קנ\"מ הדפסה"))
+        self.g_scale = QComboBox()
+        self.g_scale.setEditable(True)
+        self.g_scale.addItems(PRINT_SCALES)
+        self.g_scale.setInsertPolicy(QComboBox.NoInsert)
+        self.g_scale.setMinimumWidth(140)
+        self.g_scale.setToolTip("התאמה לגיליון – השרטוט מוגדל או מוקטן למלוא הגיליון.\n"
+                                "קנ\"מ קבוע (למשל 1:100) – מודפס בגודל אמיתי לפי קנ\"מ השרטוט. אפשר להקליד כל קנ\"מ.")
+        self.g_scale.setCurrentText(st.value("pr_scale", FIT) or FIT)
+        row1.addWidget(self.g_scale)
+        row1.addSpacing(14)
         row1.addStretch(1)
 
         row2 = QHBoxLayout()
@@ -199,6 +277,8 @@ class PrintDialog(QDialog):
         self.timer.timeout.connect(self._render_preview)
         for g in (self.g_paper, self.g_color):
             g.currentIndexChanged.connect(lambda *_: self._changed())
+        self.g_scale.currentIndexChanged.connect(lambda *_: self._changed())
+        self.g_scale.lineEdit().editingFinished.connect(self._changed)
         self.g_range.activated.connect(self._range_clicked)
         r = main.geometry()
         self.resize(int(r.width() * 0.92), int(r.height() * 0.92))
@@ -208,8 +288,10 @@ class PrintDialog(QDialog):
     def opts(self):
         def k(g):
             return g.currentData()
+        t = self.g_scale.currentText().strip()
         return {"range": k(self.g_range), "paper": k(self.g_paper), "color": k(self.g_color),
-                "printer": self.printer_box.currentText(), "copies": self.copies.value()}
+                "printer": self.printer_box.currentText(), "copies": self.copies.value(),
+                "scale": t if parse_scale(t) else FIT, "target": parse_scale(t)}
 
     def jobs(self):
         v = self.view
@@ -219,6 +301,9 @@ class PrintDialog(QDialog):
             return [(i, v.doc[i].rect) for i in range(len(v.sizes))]
         if o["range"] == "page":
             return [(cur, v.doc[cur].rect)]
+        if o["range"] == "pages":
+            sel = parse_pages(self.pages_edit.text(), len(v.sizes))
+            return [(i, v.doc[i].rect) for i in sel] if sel else []
         if o["range"] == "screen":
             sc = v.screen_clip()
             return [sc] if sc else []
@@ -234,6 +319,9 @@ class PrintDialog(QDialog):
             QTimer.singleShot(0, self._pick_window)
         else:
             self._changed()
+            if self.g_range.itemData(idx) == "pages":
+                self.pages_edit.setFocus()
+                self.pages_edit.selectAll()
 
     def _pick_window(self):
         """מסתיר את החלון, נותן לגרור מלבן על השרטוט, וחוזר עם התצוגה המקדימה."""
@@ -266,6 +354,7 @@ class PrintDialog(QDialog):
         self._changed()
 
     def _changed(self):
+        self.pages_edit.setVisible(self.g_range.currentData() == "pages")
         self.sheet = 0
         self.timer.start()
 
@@ -289,7 +378,8 @@ class PrintDialog(QDialog):
         self.ok.setText(f"הדפסה ({n} גיליונות)" if n > 1 else "הדפסה")
         if not n:
             self.pv.setPixmap(QPixmap())
-            self.pv.setText("לא נבחר אזור להדפסה")
+            self.pv.setText("מקלידים עמודים להדפסה, למשל 1-3,5" if self.g_range.currentData() == "pages"
+                            else "לא נבחר אזור להדפסה")
             self.info.setText("")
             return
         o = self.opts()
@@ -297,7 +387,7 @@ class PrintDialog(QDialog):
         wmm, hmm = sheet_mm(o["paper"], clip)
         aw, ah = max(100, self.pv.width() - 30), max(100, self.pv.height() - 30)
         res = min(aw / (wmm / 25.4), ah / (hmm / 25.4))
-        key = (pno, tuple(clip), o["paper"], o["color"], round(res), self.view.overlay_version)
+        key = (pno, tuple(clip), o["paper"], o["color"], round(res), self.view.overlay_version, o["target"])
         hit = self._cache.get(key)
         if hit is None:
             QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -309,20 +399,23 @@ class PrintDialog(QDialog):
                 p.setRenderHint(QPainter.Antialiasing, True)
                 m = MARGIN_MM / 25.4 * res
                 p.translate(m, m)
-                printed = draw_sheet(p, W - 2 * m, H - 2 * m, res, self.view.doc, pno, clip,
-                                     o["color"] == "bw", self.main._print_overlay,
-                                     self.view.scale_of(pno), self._fname(), self._when())
+                printed, cut = draw_sheet(p, W - 2 * m, H - 2 * m, res, self.view.doc, pno, clip,
+                                          o["color"] == "bw", self.main._print_overlay,
+                                          self.view.scale_of(pno), self._fname(), self._when(), o["target"])
                 p.end()
                 if len(self._cache) > 12:
                     self._cache.clear()
-                hit = (QPixmap.fromImage(img), printed)
+                hit = (QPixmap.fromImage(img), printed, cut)
                 self._cache[key] = hit
             finally:
                 QApplication.restoreOverrideCursor()
         self.pv.setText("")
         self.pv.setPixmap(hit[0])
         self.info.setText(f"קנ\"מ בהדפסה \u202a1:{_fmt_scale(hit[1])}\u202c   |   "
-                          f"גיליון {o['paper']} {'לרוחב' if wmm > hmm else 'לאורך'}")
+                          f"גיליון {o['paper']} {'לרוחב' if wmm > hmm else 'לאורך'}"
+                          + ("   |   השרטוט גדול מהגיליון בקנ\"מ הזה – יודפס החלק המרכזי"
+                             " (אפשר לבחור חלון או גיליון גדול יותר)" if hit[2] else ""))
+        self.info.setStyleSheet("color:#c8202f;" if hit[2] else "")
 
     def _fname(self):
         return os.path.basename(self.view.path or "")
@@ -335,8 +428,9 @@ class PrintDialog(QDialog):
     def save(self):
         o = self.opts()
         st = QSettings(*brand.ORG)
-        for k in ("range", "paper", "color", "printer"):
+        for k in ("range", "paper", "color", "printer", "scale"):
             st.setValue(f"pr_{k}", o[k])
+        st.setValue("pr_pages", self.pages_edit.text().strip())
 
     def _print(self):
         jobs = self.jobs()
@@ -387,7 +481,7 @@ def print_jobs(parent, view, jobs, opts, fname, when, overlay, printer):
             res = printer.resolution()
             area = printer.pageLayout().paintRectPixels(res)
             draw_sheet(painter, area.width(), area.height(), res, doc, pno, clip, bw,
-                       overlay, view.scale_of(pno), fname, when)
+                       overlay, view.scale_of(pno), fname, when, opts.get("target"))
         prog.setValue(len(jobs))
     finally:
         painter.end()

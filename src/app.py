@@ -11,7 +11,7 @@ import pymupdf
 from PySide6.QtCore import (Qt, QTimer, QThread, Signal, QObject, QRectF,
                             QPointF, QSettings, QSize, QEvent)
 from PySide6.QtGui import (QPainter, QImage, QPixmap, QColor, QIcon, QKeySequence, QTextCursor,
-                           QShortcut, QPalette, QCursor, QFont)
+                           QShortcut, QPalette, QCursor, QFont, QPen)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QAbstractScrollArea, QHBoxLayout, QVBoxLayout, QTabBar,
                                QStackedWidget,
                                QToolBar, QToolButton, QLabel, QLineEdit, QComboBox,
@@ -325,6 +325,8 @@ class PdfView(QAbstractScrollArea):
         self.mpts = None            # מדידה בתהליך (רציפה / שטח / קו מידה): (עמוד, [נקודות])
         self.chain = None           # שרשרת מידות פעילה: {"i", "u", "d", "last"}
         self._snapmark = None           # (עמוד, נקודה, סוג) – סימן ההצמדה ליד העכבר
+        self.search_hits = {}           # עמוד -> מלבני תוצאות החיפוש (מערכת התצוגה)
+        self.search_cur = None          # (עמוד, מספר) – התוצאה הנוכחית
         self._snap_cache = {}       # עמוד -> קווי השרטוט להצמדה (נקראים ברקע רק כשמודדים בעמוד)
         self._snap_gen = 0          # עולה בכל שינוי בשרטוט — תשובות ישנות מהרקע נזרקות
         self._snap_req = set()
@@ -409,6 +411,8 @@ class PdfView(QAbstractScrollArea):
         self.by_page.clear()
         self.previews.clear()
         self.items = {}
+        self.search_hits = {}
+        self.search_cur = None
         self.undo = []
         self.redo = []
         self.dirty = False
@@ -770,6 +774,23 @@ class PdfView(QAbstractScrollArea):
                 if k in self.tiles:
                     self.tiles.move_to_end(k)
                     self._draw_tile(p, r, k, cur_s, smooth=not exact)
+            hits = self.search_hits.get(i)
+            if hits:
+                p.save()
+                p.translate(r.x(), r.y())
+                p.scale(self.zoom, self.zoom)
+                cur = self.search_cur[1] if self.search_cur and self.search_cur[0] == i else -1
+                for k, h in enumerate(hits):
+                    q = QRectF(h.x0 - 1, h.y0 - 1, h.width + 2, h.height + 2)
+                    p.fillRect(q, QColor(255, 140, 0, 110) if k == cur else QColor(255, 220, 0, 95))
+                    if k == cur:
+                        pen = QPen(QColor("#e8590c"))
+                        pen.setCosmetic(True)
+                        pen.setWidthF(2.0)
+                        p.setPen(pen)
+                        p.setBrush(Qt.NoBrush)
+                        p.drawRect(q)
+                p.restore()
             if self.items.get(i) or (self.ghost and self.ghost[0] == i):
                 p.translate(r.x(), r.y())
                 p.scale(self.zoom, self.zoom)
@@ -2906,6 +2927,9 @@ class MainWindow(QMainWindow):
     def _sync_current(self):
         """מעדכן את הסרגלים לפי הכרטיסייה המוצגת."""
         v = self.view
+        fb = getattr(self, "findbar", None)
+        if fb is not None:
+            fb.view_changed()
         self._on_changed()
         if v.sizes:
             self._on_page(max(0, v._cur_page), len(v.sizes))
@@ -3393,7 +3417,8 @@ class MainWindow(QMainWindow):
             self._green_web()
 
     ICONS = {"פתיחה": "open", "קובץ": "file", "הדפסה": "print", "העתקה": "copy", "הוסף": "add", "חותמות": "stamp",
-             "מחיקה מהשרטוט": "erase", "סיבוב": "rotate", "תצוגה": "view", "תקן ירוק": "leaf", "שמירת\nשינויים": "save"}
+             "מחיקה מהשרטוט": "erase", "סיבוב": "rotate", "תצוגה": "view", "תקן ירוק": "leaf", "שמירת\nשינויים": "save",
+             "חיפוש": "search"}
     LABELS = {"מחיקה מהשרטוט": "מחיקה\nמהשרטוט", "תקן ירוק": "תקן\nירוק"}
 
     def _btn(self, text, tip, slot, primary=False, checkable=False, icon=None):
@@ -3443,6 +3468,10 @@ class MainWindow(QMainWindow):
         self.addToolBarBreak(Qt.TopToolBarArea)
         self.addToolBar(Qt.TopToolBarArea, tb)
         self.hdr_bar, self.ribbon_bar = hd, tb
+        from search import FindBar
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        self.findbar = FindBar(self)
+        self.addToolBar(Qt.TopToolBarArea, self.findbar)
         logo = QLabel()
         pm = QPixmap()
         pm.loadFromData(base64.b64decode(LOGO_B64))
@@ -3490,6 +3519,9 @@ class MainWindow(QMainWindow):
                                   self._copy_clicked)
         self.copy_btn.setCheckable(True)
         tb.addWidget(self.copy_btn)
+        tb.addWidget(self._btn("חיפוש", "חיפוש מילים או צירוף מילים במסמך (Ctrl+F).\n"
+                                        "? = תו אחד כלשהו,  * = כמה תווים.  Enter = הבא,  Shift+Enter = הקודם",
+                               self.open_find))
         tb.addSeparator()
 
         # ----- הוסף
@@ -3773,8 +3805,14 @@ class MainWindow(QMainWindow):
                         ("Ctrl+Tab", lambda: self.tabbar.setCurrentIndex((self._cur + 1) % len(self._views))),
                         ("Ctrl+Shift+Tab", lambda: self.tabbar.setCurrentIndex((self._cur - 1) % len(self._views))),
                         ("F1", self.show_help),
+                        (QKeySequence.Find, self.open_find),
                         ("Ctrl+R", lambda: self.rotate_btn.showMenu())):
             QShortcut(QKeySequence(seq), self, activated=fn)
+
+    def open_find(self, *_):
+        if not self._need_doc():
+            return
+        self.findbar.open_bar()
 
     # ----- תפריט הוסף
     def _need_doc(self):
@@ -4286,11 +4324,9 @@ class MainWindow(QMainWindow):
         v = self.view
         if not v.sizes:
             return False
-        if not self._has_changes():
-            QMessageBox.information(self, APP_NAME, "אין שינויים לשמירה.")
-            return False
         base, _ = os.path.splitext(v.path)
-        target, _ = QFileDialog.getSaveFileName(self, "שמירה בשם", base + " - מעודכן.pdf",
+        suffix = " - מעודכן.pdf" if self._has_changes() else " - עותק.pdf"   # גם בלי שינויים: שמירת עותק בשם אחר
+        target, _ = QFileDialog.getSaveFileName(self, "שמירה בשם", base + suffix,
                                                 "קובצי PDF (*.pdf)")
         if not target:
             return False
